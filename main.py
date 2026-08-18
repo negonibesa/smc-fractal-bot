@@ -73,6 +73,8 @@ class SignalGenerator:
         self.timeout = config['strategy']['timeout']
         self.adx_enabled = config.get('filters', {}).get('adx_filter', {}).get('enabled', False)
         self.adx_min = config.get('filters', {}).get('adx_filter', {}).get('min_adx', 25)
+        self.session_enabled = config.get('filters', {}).get('session_filter', {}).get('enabled', False)
+        self.trend_1d_enabled = config.get('filters', {}).get('trend_1d_filter', {}).get('enabled', False)
         
         # Состояние
         self.state = 0  # 0 = ждём sweep, 1 = ждём return to center
@@ -80,6 +82,11 @@ class SignalGenerator:
         self.sweep_price = None
         self.sweep_index = None
         self.center_at_sweep = None
+        self.daily_bullish = None  # 1D EMA50 trend
+    
+    def set_daily_trend(self, bullish: bool | None):
+        """Set 1D trend direction (called from main bot)."""
+        self.daily_bullish = bullish
     
     def process_candle(self, df: pd.DataFrame, candle_index: int) -> dict | None:
         """Обработать одну свечу. Вернуть сигнал или None."""
@@ -142,6 +149,15 @@ class SignalGenerator:
                     self.sweep_direction = None
                     return None
                 
+                # Session filter: only during London+NY (8:00-21:00 UTC)
+                if self.session_enabled:
+                    ts = df['timestamp'].iloc[candle_index]
+                    hour = ts.hour if hasattr(ts, 'hour') else 0
+                    if not (8 <= hour <= 21):
+                        self.state = 0
+                        self.sweep_direction = None
+                        return None
+                
                 # Генерируем сигнал
                 entry = self.center_at_sweep
                 
@@ -155,6 +171,17 @@ class SignalGenerator:
                     risk = abs(stop - entry)
                     tp = entry + risk * self.tp_multiplier
                     direction = 'BUY'
+                
+                # 1D trend filter: skip against daily trend
+                if self.trend_1d_enabled and self.daily_bullish is not None:
+                    if direction == 'SELL' and self.daily_bullish:
+                        self.state = 0
+                        self.sweep_direction = None
+                        return None
+                    if direction == 'BUY' and not self.daily_bullish:
+                        self.state = 0
+                        self.sweep_direction = None
+                        return None
                 
                 self.state = 0
                 self.sweep_direction = None
@@ -442,6 +469,20 @@ class SMCFractalBot:
         
         # 2. Синхронизировать позицию
         self.sync_position(symbol)
+        
+        # 2b. Update 1D trend if trend filter enabled
+        if sig_gen.trend_1d_enabled:
+            try:
+                df_1d = self.fetch_candles(symbol, interval="D", limit=100)
+                if len(df_1d) >= 50:
+                    ema50 = df_1d['close'].ewm(span=50).mean().iloc[-1]
+                    last_close = df_1d['close'].iloc[-1]
+                    sig_gen.set_daily_trend(last_close > ema50)
+                else:
+                    sig_gen.set_daily_trend(None)
+            except Exception as e:
+                logger.debug(f"1D trend fetch failed for {symbol}: {e}")
+                sig_gen.set_daily_trend(None)
         
         # 3. Trailing update для открытой позиции
         if self.tracker.has_position(symbol):

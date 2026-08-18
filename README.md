@@ -1,50 +1,56 @@
 # SMC Fractal Bot
 
-Автономный торговый бот на базе Smart Money Concepts (SMC).
+Автономный торговый бот на базе Smart Money Concepts (SMC). Deploy and forget.
 
 ## Стратегия
 
 **Sweep → Return to Center → Enter OPPOSITE**
 
 1. Обнаружить liquidity sweep на 4H таймфрейме
-2. Дождаться возврат цены к центру консолидации
+2. Дождаться возврат цены к центру консолидации (фиксированному в момент свипа)
 3. Войти ПРОТИВ направления свипа
 4. "Перед импульсом цена всегда приходит к равновесию"
 
-## Текущий статус (сентябрь 2026)
+## Статус
 
-**Рабочий бот на Bybit Testnet с Redis persistence и Telegram уведомлениями.**
+**Рабочий автономный бот на Bybit Testnet.**
 
-- ✅ Bybit V5 API подключено (testnet)
-- ✅ Redis persistence (позиции, сделки, статистика)
-- ✅ Telegram уведомления (вход/выход/ошибки/дневной отчёт)
-- ✅ Multi-pair: BNBUSDT, RENDERUSDT, FILUSDT
-- ✅ Walk-forward анализ пройден
-- ⬜ Деплой на VPS
-- ⬜ Автооптимизация по триггерам
+- ✅ Bybit V5 API (testnet)
+- ✅ Redis persistence (позиции, сделки, статистика, signal state)
+- ✅ Telegram уведомления (вход/выход/ошибки/дневной отчёт/оптимизация)
+- ✅ Multi-pair: BNBUSDT, RENDERUSDT (FILUSDT on mainnet)
+- ✅ Walk-forward validated (ROBUST)
+- ✅ Автооптимизация v2 (walk-forward + guard rails)
+- ✅ Regime detector (bull/bear/sideways + adaptive params)
+- ✅ Per-pair фильтры (session, 1D trend)
+- ⬜ Деплой на VPS (Docker)
 
 ## Архитектура
 
 ```
 smc_fractal_bot/
 ├── config/
-│   ├── settings.yaml          # Все настройки + per-pair конфиги
-│   └── best.yaml              # Лучший конфиг (PF=4.53)
+│   ├── settings.yaml          # Multi-pair конфиг + фильтры
+│   ├── best.yaml              # Legacy best config
+│   └── optimal_v2.yaml        # Iron baseline (NEVER auto-overwrite)
 ├── core/
-│   ├── __init__.py
 │   ├── bybit_client.py        # Bybit V5 API клиент
 │   ├── order_executor.py      # Исполнение ордеров
 │   ├── position_tracker.py    # Трекинг позиций + Redis
 │   ├── risk_manager.py        # Риск-менеджмент + Redis
 │   ├── redis_store.py         # Redis persistence
-│   └── notifier.py            # Telegram уведомления
-├── data/raw/                  # CSV данные (27 пар, 4H)
-├── logs/                      # Логи, графики, отчёты
+│   ├── notifier.py            # Telegram уведомления
+│   ├── auto_optimizer.py      # Walk-forward оптимизатор v2
+│   └── regime_detector.py     # Bull/bear/sideways detection
+├── data/raw/                  # CSV данные (4H, 1H, 1D)
+├── logs/
+│   ├── bot.log                # Основной лог
+│   └── optimizer.log          # Лог оптимизаций
 ├── main.py                    # Основной цикл бота
 ├── backtest.py                # Бэктест движок
-├── auto_optimize.py           # Автооптимизатор
 ├── smc_features.py            # SMC детекция (sweep, center, ADX)
-├── data_loader.py             # Bybit API загрузчик данных
+├── test_v2.py                 # Walk-forward тест v2
+├── test_final.py              # Сравнение baseline vs optimal
 ├── requirements.txt           # Зависимости
 └── .env                       # API ключи (не в git)
 ```
@@ -52,18 +58,8 @@ smc_fractal_bot/
 ## Установка
 
 ```bash
-# 1. Установить зависимости
 pip install -r requirements.txt
-
-# 2. Установить Redis 3.0+ (уже установлен)
-# Или через Docker:
-# docker run -d --name redis -p 6379:6379 redis:7
-
-# 3. Настроить .env
-cp .env.example .env
-# Заполнить BYBIT_API_KEY, BYBIT_API_SECRET, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
-
-# 4. Проверить подключение
+# Настроить .env (BYBIT_API_KEY, BYBIT_API_SECRET, TELEGRAM_*)
 python test_connection.py    # Bybit
 python test_redis.py         # Redis
 ```
@@ -78,133 +74,104 @@ Start-Process "C:\Program Files\Redis\redis-server.exe" -WindowStyle Hidden
 python main.py
 ```
 
-## Конфигурация (config/settings.yaml)
+## Результаты (Walk-Forward Validated)
 
-### Multi-pair конфиг
+### Оптимальный конфиг (v2)
 
-Каждая пара имеет свой набор параметров:
+| Pair | OOS PF | OOS Return | Вердикт | Фильтры |
+|------|--------|-----------|---------|---------|
+| BNBUSDT | **4.87** | +8.0% | ROBUST | ADX only |
+| RENDERUSDT | **2.76** | +13.1% | ROBUST | +session (8-21 UTC) |
+| FILUSDT | **1.43** | +4.9% | GOOD | +1D trend EMA50 |
 
-```yaml
-assets:
-  - symbol: BNBUSDT
-    enabled: true
-    config:
-      strategy:
-        lookback: 12
-        sweep_threshold: 0.008
-        center_proximity: 0.012
-        tp_multiplier: 1.0
-        timeout: 15
-      filters:
-        adx_filter:
-          enabled: true
-          min_adx: 25
-      trailing:
-        enabled: true
-        breakeven_at: 0.5
-        trail_activate: 1.0
-        trail_step: 0.5
+### Per-pair конфигурация
+
+| Параметр | BNB | RENDER | FIL |
+|----------|-----|--------|-----|
+| lookback | 12 | 12 | 12 |
+| sweep_threshold | 0.008 | 0.008 | 0.008 |
+| center_proximity | 0.012 | 0.012 | 0.012 |
+| tp_multiplier | 1.0 | 1.0 | 1.0 |
+| timeout | 15 | 15 | 15 |
+| adx_filter | ✅ 25 | ✅ 25 | ✅ 25 |
+| session_filter | — | ✅ 8-21 UTC | — |
+| trend_1d_filter | — | — | ✅ EMA50 |
+
+### Walk-Forward Results
+
+```
+  BNB (2200 candles):   OOS PF=4.87  Ret=+8%   ROBUST
+  RENDER (4522 candles): OOS PF=2.76  Ret=+13%  ROBUST
+  FIL (5000 candles):    OOS PF=1.43  Ret=+5%   GOOD
 ```
 
-### Параметры стратегии
+## Автооптимизация v2
 
-| Параметр | Описание | BNB | RENDER | FIL |
-|----------|----------|-----|--------|-----|
-| lookback | Свечей для центра | 12 | 12 | 12 |
-| sweep_threshold | Порог свипа | 0.008 | 0.008 | 0.008 |
-| center_proximity | Возврат к центру | 0.012 | 0.012 | 0.012 |
-| tp_multiplier | Множитель тейка | 1.0 | 1.0 | 1.0 |
-| timeout | Таймаут (свечи) | 15 | 15 | 15 |
+**Deploy and forget** — бот сам следит за качеством и пересчитывает параметры.
 
-### Триггеры автооптимизации
+### Триггеры
 
-```yaml
-optimizer:
-  trigger_days: 30        # Каждые 30 дней
-  trigger_trades: 20      # Или после 20 сделок
-  trigger_pf_drop: 1.2    # Или если PF < 1.2
-  min_improvement: 0.10   # Новый конфиг должен быть на 10% лучше
-```
+| Триггер | Условие | Действие |
+|---------|---------|----------|
+| PF drop | PF < 1.2 после 20+ сделок | Walk-forward оптимизация |
+| Time | 30+ дней без оптимизации | Walk-forward оптимизация |
+| Max DD | Daily DD > 5% | Немедленная оптимизация |
 
-## Результаты бэктеста
+### Защитные механизмы
 
-### BNBUSDT (12 месяцев)
-| Метрика | Значение |
-|---------|----------|
-| Profit Factor | **4.53** |
-| Win Rate | **70%** |
-| Return | **+27.09%** |
-| Max Drawdown | **1.85%** |
-| Trades | 46 |
-| Sharpe | 8.37 |
+- Walk-forward валидация перед применением
+- `optimal_v2.yaml` никогда не перезаписывается
+- Param delta < 50% от baseline
+- Min 10% improvement required
+- 7-day cooldown после оптимизации
+- Trade count drop < 50% OK если PF улучшается
+- ADX НИКОГДА не оптимизируется (часть стратегии)
+- Trailing params оптимизируются (breakeven_at, trail_activate, trail_step)
 
-### Walk-Forward Analysis (переоптимизация)
-| Период | PF | Return | Вердикт |
-|--------|-----|--------|---------|
-| FULL | 4.53 | +27.1% | - |
-| FIRST 50% (train) | 4.93 | +17.1% | - |
-| SECOND 50% (test) | 4.00 | +10.4% | ROBUST |
-| LAST 30% (recent) | 5.74 | +5.6% | ROBUST |
+### Regime Detection
 
-**Вердикт: НЕ переоптимизирован.** Out-of-sample PF = 4.87.
+| Режим | Params | Логика |
+|-------|--------|--------|
+| Bull | wider entry, tp×1.5 | EMA20>EMA50, ADX>25 |
+| Bear | tighter entry, faster TP | EMA20<EMA50, ADX>25 |
+| Sideways | baseline defaults | ADX<25 |
 
-### RENDERUSDT (14 месяцев)
-| PF | WR | Return | DD | Trades |
-|-----|-----|--------|-----|--------|
-| 2.67 | 46% | +39.1% | 3.17% | 102 |
-| OOS PF: **3.39** | OOS Ret: **+25.2%** | **ROBUST** |
+### Per-pair фильтры
 
-### FILUSDT (14 месяцев)
-| PF | WR | Return | DD | Trades |
-|-----|-----|--------|-----|--------|
-| 2.64 | 46% | +38.5% | 2.48% | 122 |
-| OOS PF: **1.56** | OOS Ret: **+7.0%** | **GOOD** |
+- **Session filter** (RENDER): вход только 8-21 UTC (Лондон+Нью-Йорк)
+- **1D trend filter** (FIL): не торговать против дневного тренда (EMA50)
+- **Volume filter**: ОТКЛОНЁН (слишком агрессивен)
 
 ## Redis Persistence
 
-Бот хранит в Redis:
-- Открытые позиции
-- История сделок (до 1000)
-- Статистика риска (equity, дневные лимиты)
-- Состояние signal generator
-
-При перезапуске всё восстанавливается автоматически.
-
-### Ключи Redis
 ```
 smc:pos:{symbol}        — открытые позиции
-smc:pos:index           — множество символов с позициями
 smc:trades:closed       — история закрытых сделок
 smc:risk                — статистика риска
 smc:signal:{symbol}     — состояние signal generator
 ```
 
-## Telegram уведомления
+При перезапуске всё восстанавливается автоматически.
 
-Бот отправляет:
-- **ENTRY** — вход в позицию (направление, цена, SL, TP, размер)
-- **EXIT** — закрытие (причина, PnL)
-- **DAILY REPORT** — дневная статистика
-- **ERROR** — ошибки API
-- **START/STOP** — старт и остановка
+## Telegram
+
+- ENTRY — вход (направление, цена, SL, TP, размер)
+- EXIT — закрытие (причина, PnL)
+- DAILY REPORT — дневная статистика
+- AUTO-OPTIMIZE — уведомление при оптимизации
+- ERROR — ошибки API
 
 ## Тестирование
 
 ```bash
-# Подключение к Bybit
-python test_connection.py
-
-# Подключение к Redis
-python test_redis.py
-
-# Тест ордера (testnet)
-python test_order.py
-
-# Walk-forward анализ
-python test_overfit.py
-
-# Скрининг всех пар
-python screen_pairs.py
+python test_connection.py    # Bybit connection
+python test_redis.py         # Redis persistence
+python test_order.py         # Live order (testnet)
+python test_v2.py baseline   # Walk-forward baseline
+python test_v2.py fixed_center  # Fixed center test
+python test_v2.py session    # Session filter test
+python test_final.py         # Baseline vs optimal comparison
+python screen_pairs.py       # Pair screening
 ```
 
 ## Зависимости
@@ -221,15 +188,7 @@ matplotlib>=3.7.0
 
 ## Безопасность
 
-- API ключи хранятся в `.env` (не в git)
-- Redis без пароля (localhost only)
-- Testnet режим по умолчанию
+- API ключи в `.env` (не в git)
+- Testnet по умолчанию
 - Risk limits: 1% на сделку, max drawdown 10%
-
-## Следующие шаги
-
-1. **Деплой на VPS** — Linux сервер с Docker
-2. **Redis в Docker** — заменить старый Redis 3.0
-3. **Автооптимизация** — триггеры PF < 1.2
-4. **Multi-timeframe** — добавить 1H для входов
-5. **Дополнительные пары** — XRP, BTC, ETH
+- `optimal_v2.yaml` — iron baseline, never auto-overwrite

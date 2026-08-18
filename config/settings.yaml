@@ -1,84 +1,131 @@
 # SMC FRACTAL BOT — CONFIGURATION
-# Toggle features on/off, optimizer will test all combinations
+# Multi-pair config with per-pair settings
 
-# ─── STRATEGY PARAMETERS ───────────────────────────────────────
+# ─── STRATEGY PARAMETERS (default) ───────────────────────────
 strategy:
-  # Core sweep detection
-  lookback: 8              # Candles for consolidation center
-  sweep_threshold: 0.005   # 0.5% — sweep detection threshold
-  center_proximity: 0.012  # 1.2% — return to center threshold
-  tp_multiplier: 1.0       # Take profit = risk * 1.0
-  timeout: 15              # Max candles to wait for return
+  lookback: 12
+  sweep_threshold: 0.008
+  center_proximity: 0.012
+  tp_multiplier: 1.0
+  timeout: 15
 
-# ─── TRAILING STOP ──────────────────────────────────────────────
+# ─── TRAILING STOP ──────────────────────────────────────────
 trailing:
   enabled: true
-  breakeven_at: 0.5        # Move to BE after 0.5x risk profit
-  trail_activate: 1.0      # Start trailing after 1.0x risk profit
-  trail_step: 0.5          # Trail by 0.5x risk
+  breakeven_at: 0.5
+  trail_activate: 1.0
+  trail_step: 0.5
 
-# ─── RISK MANAGEMENT ───────────────────────────────────────────
+# ─── RISK MANAGEMENT ───────────────────────────────────────
 risk:
-  risk_percent: 1.0        # 1% per trade
-  commission: 0.001        # 0.1%
-  slippage: 0.0005         # 0.05%
-  stop_buffer: 0.002       # 0.2% buffer on stop
+  risk_percent: 1.0
+  commission: 0.001
+  slippage: 0.0005
+  stop_buffer: 0.002
 
-# ─── ON/OFF TOGGLES (for auto-optimizer) ────────────────────────
+# ─── FILTERS ───────────────────────────────────────────────
 filters:
-  # Each filter can be toggled on/off
-  # Optimizer tests all 2^N combinations
   adx_filter:
-    enabled: false
+    enabled: true
     min_adx: 25
   vwap_filter:
     enabled: false
   session_filter:
     enabled: false
-    # London: 07:00-16:00 UTC
-    # NY: 13:00-22:00 UTC
   volume_filter:
     enabled: false
-    volume_multiplier: 1.5  # Sweep volume must be > 1.5x average
+    volume_multiplier: 1.5
 
-# ─── AUTO-OPTIMIZATION ──────────────────────────────────────────
+# ─── AUTO-OPTIMIZATION ──────────────────────────────────────
 optimizer:
-  # When to run optimization
-  trigger_days: 30         # Run every 30 days
-  trigger_trades: 20       # Or after 20 trades
-  trigger_pf_drop: 1.2     # Or if PF drops below 1.2
-  
-  # What to optimize (on/off only)
+  trigger_days: 30
+  trigger_trades: 20
+  trigger_pf_drop: 1.2
   optimize_params:
     - lookback
     - sweep_threshold
     - center_proximity
     - tp_multiplier
     - timeout
-  
-  # Parameter ranges
   param_ranges:
     lookback: [8, 12]
     sweep_threshold: [0.005, 0.008, 0.012]
     center_proximity: [0.005, 0.008, 0.012]
     tp_multiplier: [1.0, 2.0]
     timeout: [6, 15]
-  
-  # Improvement threshold
-  min_improvement: 0.10    # New config must be 10% better
+  min_improvement: 0.10
 
-# ─── ASSETS ─────────────────────────────────────────────────────
+# ─── ASSETS ─────────────────────────────────────────────────
 assets:
   - symbol: BNBUSDT
     enabled: true
     data_file: data/raw/BNBUSDT_4h_12m.csv
-  - symbol: BTCUSDT
-    enabled: false
-    data_file: data/raw/BTCUSDT_4h.csv
+    # BNB: PF=4.53 WR=70% Ret=+27% DD=1.85% (46 trades, 12m)
+    # Best config: lb=12 sw=0.008 prox=0.012 tp=1.0 timeout=15 ADX=ON
+    config:
+      strategy:
+        lookback: 12
+        sweep_threshold: 0.008
+        center_proximity: 0.012
+        tp_multiplier: 1.0
+        timeout: 15
+      filters:
+        adx_filter:
+          enabled: true
+          min_adx: 25
+      trailing:
+        enabled: true
+        breakeven_at: 0.5
+        trail_activate: 1.0
+        trail_step: 0.5
 
-# ─── NOTIFICATIONS ──────────────────────────────────────────────
+  - symbol: RENDERUSDT
+    enabled: true
+    data_file: data/raw/RENDERUSDT_4h_12m.csv
+    # RENDER: PF=2.67 WR=46% Ret=+39% DD=3.17% (102 trades, 14m)
+    # OOS PF=3.39 Ret=+25% — ROBUST
+    config:
+      strategy:
+        lookback: 12
+        sweep_threshold: 0.008
+        center_proximity: 0.012
+        tp_multiplier: 1.0
+        timeout: 15
+      filters:
+        adx_filter:
+          enabled: true
+          min_adx: 25
+      trailing:
+        enabled: true
+        breakeven_at: 0.5
+        trail_activate: 1.0
+        trail_step: 0.5
+
+  - symbol: FILUSDT
+    enabled: false  # Not live on testnet (code=110074)
+    data_file: data/raw/FILUSDT_4h_12m.csv
+    # FIL: PF=2.64 WR=46% Ret=+38.5% DD=2.48% (122 trades, 14m)
+    # OOS PF=1.56 Ret=+7% — GOOD
+    config:
+      strategy:
+        lookback: 12
+        sweep_threshold: 0.008
+        center_proximity: 0.012
+        tp_multiplier: 1.0
+        timeout: 15
+      filters:
+        adx_filter:
+          enabled: true
+          min_adx: 25
+      trailing:
+        enabled: true
+        breakeven_at: 0.5
+        trail_activate: 1.0
+        trail_step: 0.5
+
+# ─── NOTIFICATIONS ──────────────────────────────────────────
 notifications:
   telegram:
-    enabled: false
+    enabled: true
     bot_token: ""
     chat_id: ""

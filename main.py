@@ -1,0 +1,588 @@
+"""
+SMC Fractal Bot — Main Trading Loop
+Принцип: sweep → return to center → enter OPPOSITE → capture impulse
+"""
+
+import os
+import sys
+import time
+import logging
+import yaml
+import signal
+import pandas as pd
+from datetime import datetime
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Добавляем корень проекта в path
+sys.path.insert(0, str(Path(__file__).parent))
+
+from core import BybitClient, OrderExecutor, RiskManager, PositionTracker, TelegramNotifier
+from core.redis_store import RedisStore
+from smc_features import find_consolidation_center, detect_sweep, calculate_adx
+
+load_dotenv()
+
+# ─── LOGGING ──────────────────────────────────────────────────────
+LOG_DIR = Path(__file__).parent / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(LOG_DIR / "bot.log"),
+    ]
+)
+logger = logging.getLogger("bot")
+
+# ─── CONFIG ────────────────────────────────────────────────────────
+
+def load_config() -> dict:
+    """Загрузить конфиг. Multi-pair → settings.yaml, fallback → best.yaml."""
+    settings_path = Path(__file__).parent / "config" / "settings.yaml"
+    best_path = Path(__file__).parent / "config" / "best.yaml"
+    
+    # Prefer settings.yaml if it has assets defined
+    if settings_path.exists():
+        with open(settings_path) as f:
+            cfg = yaml.safe_load(f)
+        if cfg and cfg.get('assets'):
+            logger.info(f"Loading multi-pair config from settings.yaml ({len(cfg['assets'])} assets)")
+            return cfg
+    
+    if best_path.exists():
+        logger.info("Loading single-pair config from best.yaml")
+        with open(best_path) as f:
+            return yaml.safe_load(f)
+    
+    raise FileNotFoundError("No config found")
+
+
+# ─── SIGNAL GENERATOR ─────────────────────────────────────────────
+
+class SignalGenerator:
+    """Генерация сигналов из live данных."""
+    
+    def __init__(self, config: dict):
+        self.lookback = config['strategy']['lookback']
+        self.sweep_threshold = config['strategy']['sweep_threshold']
+        self.center_proximity = config['strategy']['center_proximity']
+        self.tp_multiplier = config['strategy']['tp_multiplier']
+        self.timeout = config['strategy']['timeout']
+        self.adx_enabled = config.get('filters', {}).get('adx_filter', {}).get('enabled', False)
+        self.adx_min = config.get('filters', {}).get('adx_filter', {}).get('min_adx', 25)
+        
+        # Состояние
+        self.state = 0  # 0 = ждём sweep, 1 = ждём return to center
+        self.sweep_direction = None
+        self.sweep_price = None
+        self.sweep_index = None
+        self.center_at_sweep = None
+    
+    def process_candle(self, df: pd.DataFrame, candle_index: int) -> dict | None:
+        """Обработать одну свечу. Вернуть сигнал или None."""
+        
+        if candle_index < self.lookback:
+            return None
+        
+        current_close = df['close'].iloc[candle_index]
+        current_high = df['high'].iloc[candle_index]
+        current_low = df['low'].iloc[candle_index]
+        
+        # Рассчитать center и sweep
+        center = find_consolidation_center(df, lookback=self.lookback)
+        sweep = detect_sweep(df, center, threshold=self.sweep_threshold)
+        
+        c = center.iloc[candle_index]
+        if pd.isna(c):
+            return None
+        
+        has_bullish = sweep['bullish_sweep'].iloc[candle_index]
+        has_bearish = sweep['bearish_sweep'].iloc[candle_index]
+        
+        # State machine
+        if self.state == 0:
+            if has_bearish:
+                self.state = 1
+                self.sweep_direction = 'bearish'
+                self.sweep_price = current_high
+                self.sweep_index = candle_index
+                self.center_at_sweep = c
+                return None
+            elif has_bullish:
+                self.state = 1
+                self.sweep_direction = 'bullish'
+                self.sweep_price = current_low
+                self.sweep_index = candle_index
+                self.center_at_sweep = c
+                return None
+        
+        elif self.state == 1:
+            # Проверяем return to center
+            if abs(current_close - self.center_at_sweep) / self.center_at_sweep < self.center_proximity:
+                # ADX фильтр
+                skip = False
+                if self.adx_enabled:
+                    adx, plus_di, minus_di = calculate_adx(df, period=14)
+                    current_adx = adx.iloc[candle_index] if not pd.isna(adx.iloc[candle_index]) else 0
+                    if current_adx < self.adx_min:
+                        skip = True
+                    if current_adx > 25:
+                        current_plus = plus_di.iloc[candle_index] if not pd.isna(plus_di.iloc[candle_index]) else 0
+                        current_minus = minus_di.iloc[candle_index] if not pd.isna(minus_di.iloc[candle_index]) else 0
+                        if self.sweep_direction == 'bearish' and current_minus < current_plus:
+                            skip = True
+                        if self.sweep_direction == 'bullish' and current_plus < current_minus:
+                            skip = True
+                
+                if skip:
+                    self.state = 0
+                    self.sweep_direction = None
+                    return None
+                
+                # Генерируем сигнал
+                entry = self.center_at_sweep
+                
+                if self.sweep_direction == 'bearish':
+                    stop = self.sweep_price * 1.003
+                    risk = abs(entry - stop)
+                    tp = entry - risk * self.tp_multiplier
+                    direction = 'SELL'
+                else:
+                    stop = self.sweep_price * 0.997
+                    risk = abs(stop - entry)
+                    tp = entry + risk * self.tp_multiplier
+                    direction = 'BUY'
+                
+                self.state = 0
+                self.sweep_direction = None
+                
+                return {
+                    'direction': direction,
+                    'entry': entry,
+                    'stop': stop,
+                    'tp': tp,
+                    'timestamp': str(df['timestamp'].iloc[candle_index]),
+                    'confidence': 0.7,
+                }
+            
+            # Timeout
+            elif candle_index - self.sweep_index > self.timeout:
+                self.state = 0
+                self.sweep_direction = None
+        
+        return None
+
+
+# ─── TRAILING MANAGER ──────────────────────────────────────────────
+
+class TrailingManager:
+    """Управление trailing stop на каждой свече."""
+    
+    def __init__(self, config: dict, tracker: PositionTracker, executor: OrderExecutor):
+        self.config = config
+        self.tracker = tracker
+        self.executor = executor
+        self.enabled = config.get('trailing', {}).get('enabled', True)
+        self.breakeven_at = config.get('trailing', {}).get('breakeven_at', 0.5)
+        self.trail_activate = config.get('trailing', {}).get('trail_activate', 1.0)
+        self.trail_step = config.get('trailing', {}).get('trail_step', 0.5)
+    
+    def update(self, symbol: str, high: float, low: float, close: float):
+        """Обновить trailing для позиции."""
+        if not self.enabled:
+            return
+        
+        pos = self.tracker.get_position(symbol)
+        if not pos:
+            return
+        
+        risk_unit = pos.risk_unit
+        if risk_unit == 0:
+            return
+        
+        # PnL в единицах риска
+        if pos.side == "LONG":
+            pnl_risk = (high - pos.entry_price) / risk_unit
+        else:
+            pnl_risk = (pos.entry_price - low) / risk_unit
+        
+        pos.highest_pnl_risk = max(pos.highest_pnl_risk, pnl_risk)
+        
+        old_stop = pos.stop_price
+        new_stop = old_stop
+        
+        # Breakeven
+        if self.breakeven_at > 0 and pos.highest_pnl_risk >= self.breakeven_at:
+            if pos.side == "LONG":
+                be_stop = pos.entry_price + pos.entry_price * 0.0005
+                new_stop = max(new_stop, be_stop)
+            else:
+                be_stop = pos.entry_price - pos.entry_price * 0.0005
+                new_stop = min(new_stop, be_stop)
+        
+        # Trailing
+        if self.trail_activate > 0 and self.trail_step > 0 and pos.highest_pnl_risk >= self.trail_activate:
+            trail_dist = risk_unit * self.trail_step
+            if pos.side == "LONG":
+                trail_stop = close - trail_dist
+                new_stop = max(new_stop, trail_stop)
+            else:
+                trail_stop = close + trail_dist
+                new_stop = min(new_stop, trail_stop)
+        
+        if new_stop != old_stop:
+            pos.stop_price = new_stop
+            # Отправляем ордер на обновление стопа
+            result = self.executor.update_stop_loss(symbol, new_stop)
+            logger.info(f"TRAIL {symbol}: SL {old_stop:.2f} → {new_stop:.2f} "
+                       f"(pnl_risk={pos.highest_pnl_risk:.2f})")
+
+
+# ─── MAIN BOT ──────────────────────────────────────────────────────
+
+class SMCFractalBot:
+    """Основной класс бота."""
+    
+    def __init__(self, config: dict):
+        self.config = config
+        self.running = False
+        
+        # Redis store
+        self.redis = None
+        redis_host = os.getenv("REDIS_HOST", "localhost")
+        redis_port = int(os.getenv("REDIS_PORT", "6379"))
+        redis_db = int(os.getenv("REDIS_DB", "0"))
+        redis_pass = os.getenv("REDIS_PASSWORD", None)
+        redis_prefix = os.getenv("REDIS_PREFIX", "smc")
+        
+        try:
+            self.redis = RedisStore(
+                host=redis_host, port=redis_port, db=redis_db,
+                password=redis_pass, prefix=redis_prefix,
+            )
+            logger.info(f"Redis connected: {redis_host}:{redis_port}/{redis_db}")
+        except Exception as e:
+            logger.warning(f"Redis unavailable, running without persistence: {e}")
+            self.redis = None
+        
+        # Telegram
+        tg_config = config.get('notifications', {}).get('telegram', {})
+        self.notifier = TelegramNotifier(
+            bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
+            chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
+            enabled=tg_config.get('enabled', False),
+        )
+        
+        # Bybit client (testnet)
+        api_key = os.getenv("BYBIT_API_KEY", "")
+        api_secret = os.getenv("BYBIT_API_SECRET", "")
+        testnet = os.getenv("BYBIT_TESTNET", "true").lower() == "true"
+        
+        if not api_key or not api_secret:
+            logger.error("BYBIT_API_KEY / BYBIT_API_SECRET not set in .env")
+            sys.exit(1)
+        
+        self.client = BybitClient(api_key, api_secret, testnet=testnet)
+        self.risk = RiskManager(
+            risk_percent=config['risk']['risk_percent'],
+            max_drawdown=10.0,
+            max_daily_loss=5.0,
+            max_consecutive_losses=3,
+            max_daily_trades=20,
+            commission=config['risk']['commission'],
+            slippage=config['risk']['slippage'],
+            stop_buffer=config['risk']['stop_buffer'],
+            redis_store=self.redis,
+        )
+        self.executor = OrderExecutor(self.client, self.risk)
+        self.tracker = PositionTracker(
+            trailing_enabled=config.get('trailing', {}).get('enabled', True),
+            breakeven_at=config.get('trailing', {}).get('breakeven_at', 0.5),
+            trail_activate=config.get('trailing', {}).get('trail_activate', 1.0),
+            trail_step=config.get('trailing', {}).get('trail_step', 0.5),
+            redis_store=self.redis,
+        )
+        self.signal_gen = SignalGenerator(config)
+        self.trailing = TrailingManager(config, self.tracker, self.executor)
+        
+        # Symbols — each with its own config
+        self.symbols = []
+        self.symbol_configs = {}
+        for asset in config.get('assets', []):
+            if asset.get('enabled', False):
+                sym = asset['symbol']
+                self.symbols.append(sym)
+                if 'config' in asset:
+                    self.symbol_configs[sym] = asset['config']
+                else:
+                    self.symbol_configs[sym] = {
+                        'strategy': config['strategy'],
+                        'trailing': config.get('trailing', {}),
+                        'filters': config.get('filters', {}),
+                    }
+        
+        # Per-symbol signal generators (must be after self.symbols is defined)
+        self.signal_gens = {}
+        for sym in self.symbols:
+            sym_config = {
+                'strategy': self._get_symbol_strategy(sym),
+                'filters': self._get_symbol_filters(sym),
+            }
+            self.signal_gens[sym] = SignalGenerator(sym_config)
+        
+        # Restore signal states from Redis
+        if self.redis:
+            self._restore_signal_states()
+        
+        # Candle data (per symbol)
+        self.candle_data = {}
+        
+        # Graceful shutdown
+        signal.signal(signal.SIGINT, self._shutdown)
+        signal.signal(signal.SIGTERM, self._shutdown)
+    
+    def _shutdown(self, signum, frame):
+        """Graceful shutdown."""
+        logger.info("Shutdown signal received")
+        self.running = False
+    
+    def _restore_signal_states(self):
+        """Restore signal generator states from Redis."""
+        if not self.redis:
+            return
+        for symbol in self.symbols:
+            state = self.redis.load_signal_state(symbol)
+            if state:
+                # Restore last sweep info to avoid re-triggering
+                logger.info(f"RESTORE SIGNAL STATE: {symbol} state={state.get('state', 0)}")
+    
+    def _save_signal_state(self, symbol: str):
+        """Save signal generator state to Redis."""
+        if not self.redis:
+            return
+        gen = self.signal_gens.get(symbol, self.signal_gen)
+        try:
+            self.redis.save_signal_state(symbol, {
+                'state': gen.state,
+                'sweep_direction': gen.sweep_direction,
+                'sweep_price': gen.sweep_price,
+                'sweep_index': gen.sweep_index,
+                'center_at_sweep': gen.center_at_sweep,
+            })
+        except Exception as e:
+            logger.error(f"Redis save signal state failed: {e}")
+    
+    def _get_symbol_strategy(self, symbol: str) -> dict:
+        """Get strategy params for a specific symbol."""
+        cfg = self.symbol_configs.get(symbol, {})
+        return cfg.get('strategy', self.config['strategy'])
+    
+    def _get_symbol_trailing(self, symbol: str) -> dict:
+        """Get trailing params for a specific symbol."""
+        cfg = self.symbol_configs.get(symbol, {})
+        return cfg.get('trailing', self.config.get('trailing', {}))
+    
+    def _get_symbol_filters(self, symbol: str) -> dict:
+        """Get filter params for a specific symbol."""
+        cfg = self.symbol_configs.get(symbol, {})
+        return cfg.get('filters', self.config.get('filters', {}))
+    
+    def fetch_candles(self, symbol: str, interval: str = "240", limit: int = 200) -> pd.DataFrame:
+        """Получить свежие свечи."""
+        
+        result = self.client.get_klines(symbol, interval=interval, limit=limit)
+        list_ = result.get('list', [])
+        
+        df = pd.DataFrame(list_, columns=[
+            "timestamp", "open", "high", "low", "close", "volume", "turnover"
+        ])
+        for col in ["open", "high", "low", "close", "volume", "turnover"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df["timestamp"] = pd.to_datetime(pd.to_numeric(df["timestamp"]), unit="ms")
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        return df
+    
+    def sync_position(self, symbol: str):
+        """Синхронизировать позицию с биржей."""
+        pos = self.client.get_position(symbol)
+        tracker_pos = self.tracker.get_position(symbol)
+        
+        if pos and not tracker_pos:
+            # Есть на бирже, нет в tracker — синхронизируем
+            side = "LONG" if pos.get('side') == 'Buy' else "SHORT"
+            entry = float(pos.get('avgPrice', 0))
+            size = float(pos.get('size', 0))
+            sl = float(pos.get('stopLoss', 0)) if pos.get('stopLoss') else 0
+            tp = float(pos.get('takeProfit', 0)) if pos.get('takeProfit') else 0
+            
+            if entry > 0 and size > 0:
+                self.tracker.open_position(
+                    symbol, side, entry, size,
+                    stop=sl if sl else entry * (0.995 if side == "LONG" else 1.005),
+                    tp=tp if tp else entry * (1.01 if side == "LONG" else 0.99)
+                )
+                logger.info(f"SYNC: {side} {size} {symbol} @ {entry}")
+        
+        elif not pos and tracker_pos:
+            # Есть в tracker, нет на бирже — закрыли вручную
+            self.tracker.close_position(symbol)
+            logger.info(f"SYNC: Position {symbol} closed externally")
+    
+    def run_cycle(self, symbol: str):
+        """Один цикл обработки для символа."""
+        
+        # 1. Получить свечи
+        df = self.fetch_candles(symbol, interval="240", limit=200)
+        sig_gen = self.signal_gens.get(symbol, self.signal_gen)
+        if df.empty or len(df) < sig_gen.lookback + 5:
+            return
+        
+        # 2. Синхронизировать позицию
+        self.sync_position(symbol)
+        
+        # 3. Trailing update для открытой позиции
+        if self.tracker.has_position(symbol):
+            last = df.iloc[-1]
+            new_stop = self.trailing.update(symbol, last['high'], last['low'], last['close'])
+            
+            # Проверить SL/TP
+            exit_result = self.tracker.check_exits(
+                symbol, last['high'], last['low'], last['close']
+            )
+            if exit_result:
+                logger.info(f"EXIT: {symbol} {exit_result['exit_reason']} PnL={exit_result['pnl']:.2f}")
+                self.risk.register_trade(exit_result['pnl'])
+                self.executor.close_position(symbol)
+                self.notifier.send_exit(
+                    symbol, exit_result['side'], exit_result['entry_price'],
+                    exit_result['exit_price'], exit_result['pnl'], exit_result['exit_reason']
+                )
+        
+        # 4. Проверить can_trade
+        can, reason = self.risk.can_trade()
+        if not can:
+            logger.debug(f"Cannot trade {symbol}: {reason}")
+            return
+        
+        # 5. Если нет позиции — ищем сигнал
+        if not self.tracker.has_position(symbol):
+            # Используем предпоследнюю свечу (текущая ещё не закрыта)
+            candle_idx = len(df) - 2
+            sig = sig_gen.process_candle(df, candle_idx)
+            self._save_signal_state(symbol)
+            
+            if sig:
+                direction = sig['direction']
+                entry = sig['entry']
+                stop = sig['stop']
+                tp = sig['tp']
+                
+                logger.info(f"SIGNAL: {direction} {symbol} @ {entry:.2f} SL={stop:.2f} TP={tp:.2f}")
+                
+                # Вход
+                if direction == "BUY":
+                    result = self.executor.open_long(symbol, entry, stop, tp)
+                else:
+                    result = self.executor.open_short(symbol, entry, stop, tp)
+                
+                if result.success:
+                    # Зарегистрировать в tracker
+                    balance = self.client.get_wallet_balance()
+                    equity = float(balance.get('totalEquity', 0))
+                    inst = self.executor._get_instrument(symbol)
+                    size = self.risk.calculate_position_size(entry, stop, equity, qty_step=inst['qty_step'])
+                    
+                    if size > 0:
+                        self.tracker.open_position(symbol, direction, entry, size, stop, tp)
+                        logger.info(f"OPENED: {direction} {size} {symbol} @ {entry:.2f}")
+                        self.notifier.send_entry(symbol, direction, entry, stop, tp, size)
+                else:
+                    logger.error(f"Order failed: {result.message}")
+                    self.notifier.send_error(result.message, f"Entry {symbol}")
+    
+    def run(self):
+        """Основной цикл."""
+        logger.info("="*60)
+        logger.info("SMC FRACTAL BOT — STARTING")
+        logger.info(f"Symbols: {self.symbols}")
+        logger.info(f"Testnet: {os.getenv('BYBIT_TESTNET', 'true')}")
+        for sym in self.symbols:
+            strat = self._get_symbol_strategy(sym)
+            logger.info(f"  {sym}: lb={strat.get('lookback')} sw={strat.get('sweep_threshold')} "
+                       f"prox={strat.get('center_proximity')} tp={strat.get('tp_multiplier')}")
+        logger.info("="*60)
+        
+        # Telegram start
+        testnet = os.getenv("BYBIT_TESTNET", "true").lower() == "true"
+        self.notifier.send_start(self.symbols, testnet)
+        
+        # Daily report tracker
+        last_report_day = datetime.utcnow().date()
+        
+        # Set leverage for all symbols
+        for symbol in self.symbols:
+            try:
+                self.executor.set_leverage(symbol, 10)
+            except Exception as e:
+                logger.warning(f"Set leverage failed for {symbol}: {e}")
+        
+        self.running = True
+        
+        while self.running:
+            cycle_start = time.time()
+            
+            for symbol in self.symbols:
+                try:
+                    self.run_cycle(symbol)
+                except Exception as e:
+                    logger.error(f"Cycle error {symbol}: {e}", exc_info=True)
+                    self.notifier.send_error(str(e), f"Cycle {symbol}")
+            
+            # Daily report at midnight UTC
+            now = datetime.utcnow()
+            if now.date() > last_report_day:
+                risk_status = self.risk.get_status()
+                self.notifier.send_daily_report(
+                    trades_today=risk_status['daily_trades'],
+                    wins=risk_status['daily_wins'],
+                    losses=risk_status['daily_losses'],
+                    pnl_today=risk_status['daily_pnl'],
+                    equity=risk_status['equity'],
+                )
+                self.risk.reset_daily()
+                last_report_day = now.date()
+            
+            # Ждём до следующей 4H свечи
+            now = datetime.utcnow()
+            minutes_to_next_4h = (4 - now.hour % 4) * 60 - now.minute
+            if minutes_to_next_4h <= 0:
+                minutes_to_next_4h = 240
+            
+            # Проверяем каждые 5 минут
+            sleep_time = min(300, minutes_to_next_4h * 60)
+            logger.debug(f"Next check in {sleep_time/60:.0f} min")
+            
+            time.sleep(sleep_time)
+        
+        # Shutdown
+        logger.info("Bot stopped")
+        stats = self.tracker.get_stats()
+        risk_status = self.risk.get_status()
+        logger.info(f"Stats: {stats}")
+        logger.info(f"Risk: {risk_status}")
+        self.notifier.send_stop()
+
+
+# ─── ENTRY POINT ───────────────────────────────────────────────────
+
+def main():
+    config = load_config()
+    bot = SMCFractalBot(config)
+    bot.run()
+
+
+if __name__ == "__main__":
+    main()

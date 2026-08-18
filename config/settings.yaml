@@ -62,6 +62,7 @@ assets:
     data_file: data/raw/BNBUSDT_4h_12m.csv
     # BNB: PF=4.53 WR=70% Ret=+27% DD=1.85% (46 trades, 12m)
     # Best config: lb=12 sw=0.008 prox=0.012 tp=1.0 timeout=15 ADX=ON
+    # No extra filters — baseline already excellent
     config:
       strategy:
         lookback: 12
@@ -84,6 +85,7 @@ assets:
     data_file: data/raw/RENDERUSDT_4h_12m.csv
     # RENDER: PF=2.67 WR=46% Ret=+39% DD=3.17% (102 trades, 14m)
     # OOS PF=3.39 Ret=+25% — ROBUST
+    # +session filter: OOS PF=2.76, Ret=+13% (v2 improvement)
     config:
       strategy:
         lookback: 12
@@ -95,6 +97,8 @@ assets:
         adx_filter:
           enabled: true
           min_adx: 25
+        session_filter:
+          enabled: true
       trailing:
         enabled: true
         breakeven_at: 0.5
@@ -106,6 +110,7 @@ assets:
     data_file: data/raw/FILUSDT_4h_12m.csv
     # FIL: PF=2.64 WR=46% Ret=+38.5% DD=2.48% (122 trades, 14m)
     # OOS PF=1.56 Ret=+7% — GOOD
+    # +trend_1d filter: OOS PF=1.43, Ret=+4.9% (v2 improvement)
     config:
       strategy:
         lookback: 12
@@ -117,6 +122,8 @@ assets:
         adx_filter:
           enabled: true
           min_adx: 25
+        trend_1d_filter:
+          enabled: true
       trailing:
         enabled: true
         breakeven_at: 0.5

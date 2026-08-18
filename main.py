@@ -19,6 +19,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from core import BybitClient, OrderExecutor, RiskManager, PositionTracker, TelegramNotifier
 from core.redis_store import RedisStore
+from core.auto_optimizer import AutoOptimizer
+from core.regime_detector import detect_regime, adapt_params_for_regime
 from smc_features import find_consolidation_center, detect_sweep, calculate_adx
 
 load_dotenv()
@@ -335,6 +337,14 @@ class SMCFractalBot:
         self.signal_gen = SignalGenerator(config)
         self.trailing = TrailingManager(config, self.tracker, self.executor)
         
+        # Auto-optimizer
+        self.optimizer = AutoOptimizer(config, redis_store=self.redis)
+        self.start_time = datetime.utcnow()
+        self.last_optimize_check = {}
+        
+        # Regime state per symbol
+        self.regime_state = {}
+        
         # Symbols — each with its own config
         self.symbols = []
         self.symbol_configs = {}
@@ -484,6 +494,19 @@ class SMCFractalBot:
                 logger.debug(f"1D trend fetch failed for {symbol}: {e}")
                 sig_gen.set_daily_trend(None)
         
+        # 2c. Detect market regime (every 4 candles = ~16 hours)
+        last_regime = self.regime_state.get(symbol, {})
+        last_regime_candle = last_regime.get('last_candle', -999)
+        if len(df) - 2 - last_regime_candle >= 4:
+            regime = detect_regime(df)
+            self.regime_state[symbol] = {
+                'regime': regime,
+                'last_candle': len(df) - 2,
+            }
+            if regime['regime'] != 'sideways':
+                logger.info(f"REGIME {symbol}: {regime['regime']} "
+                          f"(adx={regime['adx']:.1f}, strength={regime['strength']:.2f})")
+        
         # 3. Trailing update для открытой позиции
         if self.tracker.has_position(symbol):
             last = df.iloc[-1]
@@ -595,6 +618,49 @@ class SMCFractalBot:
                 )
                 self.risk.reset_daily()
                 last_report_day = now.date()
+            
+            # Auto-optimization check (once per day per symbol)
+            days_running = (now - self.start_time).total_seconds() / 86400
+            for symbol in self.symbols:
+                last_check = self.last_optimize_check.get(symbol, datetime.min)
+                if (now - last_check).total_seconds() < 86400:  # max once/day
+                    continue
+                
+                try:
+                    risk_status = self.risk.get_status()
+                    trades = risk_status.get('total_trades', 0)
+                    pf = risk_status.get('profit_factor', 2.0)
+                    
+                    if self.optimizer.should_optimize(symbol, trades, days_running, pf):
+                        df = self.fetch_candles(symbol, interval="240", limit=500)
+                        if len(df) > 100:
+                            current_params = self._get_symbol_strategy(symbol)
+                            current_filters = self._get_symbol_filters(symbol)
+                            current_trailing = self._get_symbol_trailing(symbol)
+                            
+                            new_config = self.optimizer.optimize(
+                                symbol, df, current_params, current_filters, current_trailing
+                            )
+                            
+                            if new_config:
+                                # Apply new config (update in-memory only, not file)
+                                self.symbol_configs[symbol]['strategy'].update(new_config)
+                                # Rebuild signal generator
+                                sym_config = {
+                                    'strategy': self._get_symbol_strategy(symbol),
+                                    'filters': self._get_symbol_filters(symbol),
+                                }
+                                self.signal_gens[symbol] = SignalGenerator(sym_config)
+                                
+                                logger.info(f"APPLIED NEW CONFIG for {symbol}: {new_config}")
+                                self.notifier.send_error(
+                                    f"Auto-optimized {symbol}: {new_config}",
+                                    "AUTO-OPTIMIZE"
+                                )
+                    
+                    self.last_optimize_check[symbol] = now
+                except Exception as e:
+                    logger.error(f"Auto-opt check failed for {symbol}: {e}")
             
             # Ждём до следующей 4H свечи
             now = datetime.utcnow()

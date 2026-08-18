@@ -17,13 +17,35 @@
 
 - ✅ Bybit V5 API (testnet)
 - ✅ Redis persistence (позиции, сделки, статистика, signal state)
-- ✅ Telegram уведомления (вход/выход/ошибки/дневной отчёт/оптимизация)
+- ✅ Telegram уведомления + команды (/help)
 - ✅ Multi-pair: BNBUSDT, RENDERUSDT (FILUSDT on mainnet)
 - ✅ Walk-forward validated (ROBUST)
-- ✅ Автооптимизация v2 (walk-forward + guard rails)
+- ✅ Автооптимизация v2 (walk-forward + guard rails + regime params)
 - ✅ Regime detector (bull/bear/sideways + adaptive params)
 - ✅ Per-pair фильтры (session, 1D trend)
+- ✅ Daily + Weekly reports (Telegram, auto at 00:10 UTC)
+- ✅ Stress tests (1H, 4H, 1D, bear periods)
 - ⬜ Деплой на VPS (Docker)
+
+## Telegram Commands
+
+| Команда | Описание |
+|---------|----------|
+| `/help` | Список всех команд |
+| `/status` | Equity, regime, позиции, rolling PF |
+| `/balance` | Equity, available, used, открытые позиции |
+| `/report` | То же что /status |
+| `/daily` | Дневной отчёт (PnL, DD, rolling PF, regime) |
+| `/weekly` | Недельный отчёт (PF, WR, avg R, per-pair, long/short) |
+
+### Автоматические уведомления
+
+- ENTRY — вход (направление, цена, SL, TP, размер)
+- EXIT — закрытие (причина, PnL)
+- DAILY REPORT — дневная статистика (00:10 UTC)
+- WEEKLY REPORT — недельная статистика (воскресенье 00:10 UTC)
+- AUTO-OPTIMIZE — уведомление при оптимизации
+- ERROR — ошибки API
 
 ## Архитектура
 
@@ -41,16 +63,17 @@ smc_fractal_bot/
 │   ├── redis_store.py         # Redis persistence
 │   ├── notifier.py            # Telegram уведомления
 │   ├── auto_optimizer.py      # Walk-forward оптимизатор v2
-│   └── regime_detector.py     # Bull/bear/sideways detection
+│   ├── regime_detector.py     # Bull/bear/sideways detection
+│   └── reporter.py            # Daily/Weekly reports + metrics
 ├── data/raw/                  # CSV данные (4H, 1H, 1D)
 ├── logs/
-│   ├── bot.log                # Основной лог
-│   └── optimizer.log          # Лог оптимизаций
+│   └── bot.log                # Основной лог
 ├── main.py                    # Основной цикл бота
 ├── backtest.py                # Бэктест движок
 ├── smc_features.py            # SMC детекция (sweep, center, ADX)
 ├── test_v2.py                 # Walk-forward тест v2
-├── test_final.py              # Сравнение baseline vs optimal
+├── test_final.py              # Baseline vs optimal comparison
+├── test_stress.py             # Stress tests (timeframes + bear)
 ├── requirements.txt           # Зависимости
 └── .env                       # API ключи (не в git)
 ```
@@ -97,13 +120,19 @@ python main.py
 | session_filter | — | ✅ 8-21 UTC | — |
 | trend_1d_filter | — | — | ✅ EMA50 |
 
-### Walk-Forward Results
+## Stress Test Results
 
-```
-  BNB (2200 candles):   OOS PF=4.87  Ret=+8%   ROBUST
-  RENDER (4522 candles): OOS PF=2.76  Ret=+13%  ROBUST
-  FIL (5000 candles):    OOS PF=1.43  Ret=+5%   GOOD
-```
+| Pair | TF | PF | WR | Return | DD | Trades |
+|------|-----|-----|-----|--------|-----|--------|
+| BNB | 1H | 1.28 | 41% | +3.4% | 2.85% | 54 |
+| BNB | **4H** | **4.53** | **70%** | **+27.1%** | 1.85% | 46 |
+| BNB | 1D | 8.28 | 70% | +8.4% | 1.03% | 10 |
+| RENDER | **4H** | **2.67** | **46%** | **+39.1%** | 3.17% | 102 |
+| RENDER | 1D | 6.13 | 62% | +10.6% | 1.01% | 8 |
+
+**Bear market**: RENDER PF=18.87 (5 trades) — стратегия выживает в падениях.
+
+**Вывод**: 4H = оптимальный ТФ для обеих пар.
 
 ## Автооптимизация v2
 
@@ -132,9 +161,9 @@ python main.py
 
 | Режим | Params | Логика |
 |-------|--------|--------|
-| Bull | wider entry, tp×1.5 | EMA20>EMA50, ADX>25 |
-| Bear | tighter entry, faster TP | EMA20<EMA50, ADX>25 |
-| Sideways | baseline defaults | ADX<25 |
+| Bull 🟢 | wider entry, tp×1.5 | EMA20>EMA50, ADX>25 |
+| Bear 🔴 | tighter entry, faster TP | EMA20<EMA50, ADX>25 |
+| Sideways 🟡 | baseline defaults | ADX<25 |
 
 ### Per-pair фильтры
 
@@ -142,35 +171,44 @@ python main.py
 - **1D trend filter** (FIL): не торговать против дневного тренда (EMA50)
 - **Volume filter**: ОТКЛОНЁН (слишком агрессивен)
 
+## Reports (Grok Spec)
+
+### Daily Report (00:10 UTC)
+
+- Equity, Daily PnL, Trades today (W/L)
+- Current Drawdown, Rolling PF(20) + status (🟢>1.6 / 🟡>1.3 / 🔴<1.3)
+- Open positions, Regime per pair, Last optimization
+
+### Weekly Report (Воскресенье 00:10 UTC)
+
+- Weekly Return, Win Rate, Trades (W/L)
+- Rolling PF(30), Rolling WR(30), Avg R
+- Max DD (week + total), Avg trade duration, Time in position %
+- Per pair: PF, WR, trades, PnL
+- Long vs Short: trades, WR, PnL
+- Regime per pair
+- Optimization count + param changes
+
 ## Redis Persistence
 
 ```
 smc:pos:{symbol}        — открытые позиции
-smc:trades:closed       — история закрытых сделок
+smc:trades:closed       — история закрытых сделок (с exit_price, exit_reason, size)
 smc:risk                — статистика риска
 smc:signal:{symbol}     — состояние signal generator
 ```
 
 При перезапуске всё восстанавливается автоматически.
 
-## Telegram
-
-- ENTRY — вход (направление, цена, SL, TP, размер)
-- EXIT — закрытие (причина, PnL)
-- DAILY REPORT — дневная статистика
-- AUTO-OPTIMIZE — уведомление при оптимизации
-- ERROR — ошибки API
-
 ## Тестирование
 
 ```bash
 python test_connection.py    # Bybit connection
 python test_redis.py         # Redis persistence
-python test_order.py         # Live order (testnet)
 python test_v2.py baseline   # Walk-forward baseline
-python test_v2.py fixed_center  # Fixed center test
 python test_v2.py session    # Session filter test
 python test_final.py         # Baseline vs optimal comparison
+python test_stress.py        # Stress tests (timeframes + bear)
 python screen_pairs.py       # Pair screening
 ```
 

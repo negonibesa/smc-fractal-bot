@@ -94,11 +94,17 @@ class BybitClient:
         result = self._request("GET", "/v5/market/tickers", {"category": "linear", "symbol": symbol})
         return result['list'][0] if result.get('list') else {}
     
-    def get_klines(self, symbol: str, interval: str = "60", limit: int = 200) -> list:
+    def get_klines(self, symbol: str, interval: str = "60", limit: int = 200,
+                   start: int = None, end: int = None) -> list:
         """Get kline/candlestick data."""
-        return self._request("GET", "/v5/market/kline", {
+        params = {
             "category": "linear", "symbol": symbol, "interval": interval, "limit": limit
-        })
+        }
+        if start:
+            params["start"] = start
+        if end:
+            params["end"] = end
+        return self._request("GET", "/v5/market/kline", params)
     
     def get_orderbook(self, symbol: str, limit: int = 1) -> Dict:
         """Get orderbook."""

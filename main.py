@@ -621,25 +621,54 @@ class SMCFractalBot:
 
     def _handle_telegram_command(self, text: str):
         """Handle a Telegram command."""
-        if text == '/report':
-            balance = self.client.get_wallet_balance()
-            equity = float(balance.get('totalEquity', 0)) if balance else 0
+        balance = self.client.get_wallet_balance()
+        equity = float(balance.get('totalEquity', 0)) if balance else 0
+        available = float(balance.get('availableToWithdraw', 0)) if balance else 0
+
+        if text == '/report' or text == '/status':
             risk_status = self.risk.get_status()
             report = self.reporter.build_status_report(
                 equity, self.tracker.positions, risk_status, self.regime_state)
             self.notifier._send(report)
         elif text == '/daily':
-            balance = self.client.get_wallet_balance()
-            equity = float(balance.get('totalEquity', 0)) if balance else 0
             report = self.reporter.build_daily_report(
                 equity, self.tracker.positions, self.regime_state)
             self.notifier._send(report)
         elif text == '/weekly':
-            balance = self.client.get_wallet_balance()
-            equity = float(balance.get('totalEquity', 0)) if balance else 0
             report = self.reporter.build_weekly_report(
                 equity, self.tracker.positions, self.regime_state)
             self.notifier._send(report)
+        elif text == '/balance':
+            positions = self.tracker.positions
+            pos_text = ""
+            for sym, pos in positions.items():
+                e = "+" if pos.side == "LONG" else "-"
+                pos_text += f"  {sym}: {pos.side} {pos.size} @ {pos.entry_price:.2f} SL={pos.stop_price:.2f}\n"
+            if not pos_text:
+                pos_text = "  none\n"
+            msg = (
+                f"💰 <b>BALANCE</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"Equity: <code>${equity:,.2f}</code>\n"
+                f"Available: <code>${available:,.2f}</code>\n"
+                f"Used: <code>${equity - available:,.2f}</code>\n"
+                f"\n📦 <b>Positions ({len(positions)})</b>\n{pos_text}"
+                f"━━━━━━━━━━━━━━━━━━"
+            )
+            self.notifier._send(msg)
+        elif text == '/help':
+            msg = (
+                f"📋 <b>COMMANDS</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"/status — bot status + regime\n"
+                f"/balance — equity + positions\n"
+                f"/report — same as /status\n"
+                f"/daily — daily report\n"
+                f"/weekly — weekly report\n"
+                f"/help — this message\n"
+                f"━━━━━━━━━━━━━━━━━━"
+            )
+            self.notifier._send(msg)
 
     def run(self):
         """Основной цикл."""

@@ -503,7 +503,19 @@ class SMCFractalBot:
                 'regime': regime,
                 'last_candle': len(df) - 2,
             }
-            if regime['regime'] != 'sideways':
+            # Adapt params for regime
+            current_params = self._get_symbol_strategy(symbol)
+            adapted = self.optimizer.get_regime_params(symbol, regime['regime'], current_params)
+            if adapted != current_params:
+                self.symbol_configs[symbol]['strategy'].update(adapted)
+                # Rebuild signal generator with adapted params
+                sym_config = {
+                    'strategy': self._get_symbol_strategy(symbol),
+                    'filters': self._get_symbol_filters(symbol),
+                }
+                self.signal_gens[symbol] = SignalGenerator(sym_config)
+                logger.info(f"REGIME ADAPT {symbol}: {regime['regime']} → params updated")
+            elif regime['regime'] != 'sideways':
                 logger.info(f"REGIME {symbol}: {regime['regime']} "
                           f"(adx={regime['adx']:.1f}, strength={regime['strength']:.2f})")
         
@@ -630,21 +642,23 @@ class SMCFractalBot:
                     risk_status = self.risk.get_status()
                     trades = risk_status.get('total_trades', 0)
                     pf = risk_status.get('profit_factor', 2.0)
+                    daily_dd = abs(risk_status.get('daily_pnl', 0)) / max(risk_status.get('equity', 1), 1)
                     
-                    if self.optimizer.should_optimize(symbol, trades, days_running, pf):
+                    if self.optimizer.should_optimize(symbol, trades, days_running, pf, daily_dd):
                         df = self.fetch_candles(symbol, interval="240", limit=500)
                         if len(df) > 100:
                             current_params = self._get_symbol_strategy(symbol)
                             current_filters = self._get_symbol_filters(symbol)
                             current_trailing = self._get_symbol_trailing(symbol)
                             
-                            new_config = self.optimizer.optimize(
+                            result = self.optimizer.optimize(
                                 symbol, df, current_params, current_filters, current_trailing
                             )
                             
-                            if new_config:
-                                # Apply new config (update in-memory only, not file)
-                                self.symbol_configs[symbol]['strategy'].update(new_config)
+                            if result:
+                                # Apply new config
+                                self.symbol_configs[symbol]['strategy'].update(result['strategy'])
+                                self.symbol_configs[symbol]['trailing'].update(result['trailing'])
                                 # Rebuild signal generator
                                 sym_config = {
                                     'strategy': self._get_symbol_strategy(symbol),
@@ -652,9 +666,9 @@ class SMCFractalBot:
                                 }
                                 self.signal_gens[symbol] = SignalGenerator(sym_config)
                                 
-                                logger.info(f"APPLIED NEW CONFIG for {symbol}: {new_config}")
+                                logger.info(f"APPLIED NEW CONFIG for {symbol}: {result}")
                                 self.notifier.send_error(
-                                    f"Auto-optimized {symbol}: {new_config}",
+                                    f"Auto-optimized {symbol}: PF improvement",
                                     "AUTO-OPTIMIZE"
                                 )
                     

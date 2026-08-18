@@ -9,6 +9,7 @@ import time
 import logging
 import yaml
 import signal
+import threading
 import pandas as pd
 from datetime import datetime
 from pathlib import Path
@@ -279,7 +280,6 @@ class SMCFractalBot:
     def __init__(self, config: dict):
         self.config = config
         self.running = False
-        self._tg_offset = 0  # Telegram getUpdates offset
         
         # Redis store
         self.redis = None
@@ -505,7 +505,9 @@ class SMCFractalBot:
         if len(df) - 2 - last_regime_candle >= 4:
             regime = detect_regime(df)
             self.regime_state[symbol] = {
-                'regime': regime,
+                'regime': regime['regime'],
+                'adx': float(regime.get('adx', 0)),
+                'strength': float(regime.get('strength', 0)),
                 'last_candle': len(df) - 2,
             }
             # Adapt params for regime
@@ -584,46 +586,60 @@ class SMCFractalBot:
                     logger.error(f"Order failed: {result.message}")
                     self.notifier.send_error(result.message, f"Entry {symbol}")
     
-    def _check_telegram_commands(self):
-        """Poll Telegram for /report and /weekly commands."""
-        if not self.notifier.enabled:
-            return
-        try:
+    def _start_telegram_listener(self):
+        """Start background thread for Telegram command polling."""
+        def _poll_loop():
             import requests as req
-            url = f"https://api.telegram.org/bot{self.notifier.bot_token}/getUpdates"
-            resp = req.get(url, params={'offset': self._tg_offset, 'timeout': 1}, timeout=5)
-            if resp.status_code != 200:
-                return
-            data = resp.json()
-            for update in data.get('result', []):
-                self._tg_offset = update['update_id'] + 1
-                msg = update.get('message', {})
-                text = msg.get('text', '').strip().lower()
-                chat = str(msg.get('chat', {}).get('id', ''))
-                if chat != self.notifier.chat_id:
-                    continue
+            offset = 0
+            while self.running:
+                try:
+                    url = f"https://api.telegram.org/bot{self.notifier.bot_token}/getUpdates"
+                    resp = req.get(url, params={'offset': offset, 'timeout': 10}, timeout=15)
+                    if resp.status_code != 200:
+                        time.sleep(5)
+                        continue
+                    data = resp.json()
+                    for update in data.get('result', []):
+                        offset = update['update_id'] + 1
+                        msg = update.get('message', {})
+                        text = msg.get('text', '').strip().lower()
+                        chat = str(msg.get('chat', {}).get('id', ''))
+                        if chat != self.notifier.chat_id:
+                            continue
+                        logger.info(f"TG CMD: {text} from {chat}")
+                        try:
+                            self._handle_telegram_command(text)
+                        except Exception as e:
+                            logger.error(f"TG cmd error: {e}")
+                except Exception as e:
+                    logger.debug(f"TG poll error: {e}")
+                time.sleep(2)
+        
+        t = threading.Thread(target=_poll_loop, daemon=True, name="tg-commands")
+        t.start()
+        logger.info("Telegram command listener started")
 
-                if text == '/report':
-                    balance = self.client.get_wallet_balance()
-                    equity = float(balance.get('totalEquity', 0)) if balance else 0
-                    risk_status = self.risk.get_status()
-                    report = self.reporter.build_status_report(
-                        equity, self.tracker.positions, risk_status, self.regime_state)
-                    self.notifier._send(report)
-                elif text == '/weekly':
-                    balance = self.client.get_wallet_balance()
-                    equity = float(balance.get('totalEquity', 0)) if balance else 0
-                    report = self.reporter.build_weekly_report(
-                        equity, self.tracker.positions, self.regime_state)
-                    self.notifier._send(report)
-                elif text == '/daily':
-                    balance = self.client.get_wallet_balance()
-                    equity = float(balance.get('totalEquity', 0)) if balance else 0
-                    report = self.reporter.build_daily_report(
-                        equity, self.tracker.positions, self.regime_state)
-                    self.notifier._send(report)
-        except Exception as e:
-            logger.debug(f"TG command poll error: {e}")
+    def _handle_telegram_command(self, text: str):
+        """Handle a Telegram command."""
+        if text == '/report':
+            balance = self.client.get_wallet_balance()
+            equity = float(balance.get('totalEquity', 0)) if balance else 0
+            risk_status = self.risk.get_status()
+            report = self.reporter.build_status_report(
+                equity, self.tracker.positions, risk_status, self.regime_state)
+            self.notifier._send(report)
+        elif text == '/daily':
+            balance = self.client.get_wallet_balance()
+            equity = float(balance.get('totalEquity', 0)) if balance else 0
+            report = self.reporter.build_daily_report(
+                equity, self.tracker.positions, self.regime_state)
+            self.notifier._send(report)
+        elif text == '/weekly':
+            balance = self.client.get_wallet_balance()
+            equity = float(balance.get('totalEquity', 0)) if balance else 0
+            report = self.reporter.build_weekly_report(
+                equity, self.tracker.positions, self.regime_state)
+            self.notifier._send(report)
 
     def run(self):
         """Основной цикл."""
@@ -653,6 +669,9 @@ class SMCFractalBot:
                 logger.warning(f"Set leverage failed for {symbol}: {e}")
         
         self.running = True
+        
+        # Start Telegram command listener (after running=True)
+        self._start_telegram_listener()
         
         while self.running:
             cycle_start = time.time()
@@ -727,9 +746,6 @@ class SMCFractalBot:
                     self.last_optimize_check[symbol] = now
                 except Exception as e:
                     logger.error(f"Auto-opt check failed for {symbol}: {e}")
-            
-            # Check Telegram commands
-            self._check_telegram_commands()
             
             # Ждём до следующей 4H свечи
             now = datetime.utcnow()

@@ -105,12 +105,11 @@ assets:
         trail_activate: 1.0
         trail_step: 0.5
 
-  - symbol: FILUSDT
-    enabled: false  # Not live on testnet (code=110074)
-    data_file: data/raw/FILUSDT_4h_12m.csv
-    # FIL: PF=2.64 WR=46% Ret=+38.5% DD=2.48% (122 trades, 14m)
-    # OOS PF=1.56 Ret=+7% — GOOD
-    # +trend_1d filter: OOS PF=1.43, Ret=+4.9% (v2 improvement)
+  - symbol: XRPUSDT
+    enabled: true
+    data_file: data/raw/XRPUSDT_4h_12m.csv
+    # XRP: PF=3.56 baseline, PF=85.52 with session+trend_1d (10 trades, DD=0.11%)
+    # Period stress: Bear PF=4.53, Sideways PF=2.47 — ROBUST
     config:
       strategy:
         lookback: 12
@@ -122,6 +121,8 @@ assets:
         adx_filter:
           enabled: true
           min_adx: 25
+        session_filter:
+          enabled: true
         trend_1d_filter:
           enabled: true
       trailing:

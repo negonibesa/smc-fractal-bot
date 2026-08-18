@@ -1,31 +1,42 @@
 """
-Auto-Optimizer with walk-forward validation and guard rails.
+Auto-Optimizer v2 — walk-forward validated, deploy-and-forget.
 
-Rules (from Grok's recommendations):
+My rules (not Grok's — I disagree on some points):
 1. Walk-forward validate ANY new config before applying
 2. Never overwrite optimal_v2.yaml baseline
-3. Log parameter deltas — red flag if jump > 50%
-4. Conservative parameter ranges only
+3. Log parameter deltas — red flag if > 50% drift
+4. Conservative parameter ranges (ADX NEVER touched)
 5. Minimum 10% improvement over current config
+6. 7-day cooldown after each optimization
+7. Max DD > 5% in a day → force optimization immediately
+8. Trade count drop < 50% is OK if PF improves (fewer better trades > more mediocre)
+9. Per-regime param sets: bull / bear / sideways stored separately
 """
 import logging
 import yaml
+import json
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 logger = logging.getLogger("optimizer")
 
 # ─── PARAM RANGES (conservative) ────────────────────────────────
-# Never let params drift far from baseline
+# ADX is NEVER optimized — it's part of strategy identity, not a tuning knob
 PARAM_RANGES = {
     'lookback': [8, 10, 12, 15],
     'sweep_threshold': [0.005, 0.008, 0.010, 0.012],
     'center_proximity': [0.008, 0.010, 0.012, 0.015],
     'tp_multiplier': [1.0, 1.5, 2.0],
     'timeout': [6, 10, 15, 20],
+}
+
+TRAILING_RANGES = {
+    'breakeven_at': [0.3, 0.5, 0.7],
+    'trail_activate': [0.8, 1.0, 1.5],
+    'trail_step': [0.3, 0.5, 0.7],
 }
 
 # Baseline params (from optimal_v2) — used as anchor
@@ -37,6 +48,21 @@ BASELINE_PARAMS = {
     'timeout': 15,
 }
 
+# Per-regime param adjustments (relative to baseline)
+REGIME_OVERRIDES = {
+    'bull': {
+        'center_proximity': 0.015,   # wider entry in trends
+        'tp_multiplier': 1.5,        # ride the trend
+        'timeout': 10,               # don't wait too long
+    },
+    'bear': {
+        'center_proximity': 0.008,   # tighter entry
+        'tp_multiplier': 1.0,        # take profit faster
+        'timeout': 8,                # false breakouts more common
+    },
+    'sideways': {},  # use baseline defaults
+}
+
 
 def generate_param_combos(ranges: dict, max_combos: int = 50) -> list[dict]:
     """Generate parameter combinations from ranges."""
@@ -45,9 +71,7 @@ def generate_param_combos(ranges: dict, max_combos: int = 50) -> list[dict]:
     values = [ranges[k] for k in keys]
     combos = [dict(zip(keys, combo)) for combo in itertools.product(*values)]
     
-    # Limit combos to avoid long optimization runs
     if len(combos) > max_combos:
-        # Sample evenly across the space
         indices = np.linspace(0, len(combos)-1, max_combos, dtype=int)
         combos = [combos[i] for i in indices]
     
@@ -130,7 +154,6 @@ def run_walk_forward(df: pd.DataFrame, params: dict, filters: dict,
                 'ret': metrics['total_return'], 'dd': metrics['max_drawdown'],
                 'trades': metrics['total_trades']}
     
-    # Walk-forward: split into n_splits, test on each OOS portion
     split_size = n // n_splits
     oos_results = []
     
@@ -152,6 +175,7 @@ def run_walk_forward(df: pd.DataFrame, params: dict, filters: dict,
         'avg_dd': np.mean([r['dd'] for r in oos_results]),
         'total_trades': sum(r['trades'] for r in oos_results),
         'min_pf': min(r['pf'] for r in oos_results),
+        'max_dd': max(r['dd'] for r in oos_results),
     }
 
 
@@ -166,7 +190,7 @@ def param_delta(p1: dict, p2: dict) -> float:
 
 
 class AutoOptimizer:
-    """Auto-optimization with guard rails."""
+    """Auto-optimization with guard rails — my version."""
     
     def __init__(self, config: dict, redis_store=None):
         self.config = config
@@ -175,8 +199,11 @@ class AutoOptimizer:
         self.trigger_days = opt_cfg.get('trigger_days', 30)
         self.trigger_trades = opt_cfg.get('trigger_trades', 20)
         self.trigger_pf_drop = opt_cfg.get('trigger_pf_drop', 1.2)
+        self.trigger_dd_daily = 0.05  # 5% daily DD → force optimize
         self.min_improvement = opt_cfg.get('min_improvement', 0.10)
-        self.max_param_delta = 0.5  # 50% max drift from baseline
+        self.max_param_delta = 0.5
+        self.cooldown_days = 7
+        self.max_trade_drop = 0.50  # 50% trade drop is OK if PF improves
         
         # Load baseline config (iron — never auto-overwrite)
         baseline_path = Path(__file__).parent.parent / "config" / "optimal_v2.yaml"
@@ -188,13 +215,30 @@ class AutoOptimizer:
             self.baseline = config
             logger.warning("No optimal_v2.yaml found, using current config as baseline")
         
-        # Optimization log
+        # State tracking
+        self.last_optimize_time = {}  # symbol -> datetime
         self.log_path = Path(__file__).parent.parent / "logs" / "optimizer.log"
         self.log_path.parent.mkdir(exist_ok=True)
+        
+        # Per-regime configs (loaded from Redis or initialized)
+        self.regime_configs = {}  # {symbol: {bull: {...}, bear: {...}, sideways: {...}}}
     
     def should_optimize(self, symbol: str, trades_count: int, 
-                       days_since_start: float, current_pf: float) -> bool:
+                       days_since_start: float, current_pf: float,
+                       daily_dd: float = 0.0) -> bool:
         """Check if optimization should trigger."""
+        
+        # Force trigger: daily DD > 5%
+        if daily_dd > self.trigger_dd_daily:
+            logger.info(f"FORCE OPTIMIZE: {symbol} — daily DD={daily_dd:.1%} > {self.trigger_dd_daily:.1%}")
+            return True
+        
+        # Cooldown check
+        last_opt = self.last_optimize_time.get(symbol)
+        if last_opt and (datetime.utcnow() - last_opt).days < self.cooldown_days:
+            return False
+        
+        # Standard triggers
         if trades_count < self.trigger_trades:
             return False
         if days_since_start < self.trigger_days:
@@ -213,48 +257,58 @@ class AutoOptimizer:
         Run optimization for a symbol.
         Returns new config dict if better, None otherwise.
         """
-        logger.info(f"OPTIMIZING {symbol} — testing {len(PARAM_RANGES)} param dimensions")
+        logger.info(f"OPTIMIZING {symbol} — testing param space")
         
-        # Generate parameter combos
+        # Test strategy params
         combos = generate_param_combos(PARAM_RANGES, max_combos=40)
-        
-        best_config = None
+        best_strategy = None
         best_pf = 0
-        all_results = []
+        best_result = None
+        current_trades = 0
         
         for combo in combos:
             test_params = {**current_params, **combo}
-            
             result = run_walk_forward(df, test_params, current_filters, current_trailing)
             if result is None:
                 continue
             
-            all_results.append({'params': combo, 'result': result})
+            current_trades = max(current_trades, result['total_trades'])
             
-            # Must beat current PF by min_improvement
-            # Also must have reasonable min PF across all OOS splits
             if (result['avg_pf'] > best_pf and 
                 result['min_pf'] >= 1.0 and
-                result['total_trades'] >= 5):
+                result['total_trades'] >= 3):
                 best_pf = result['avg_pf']
-                best_config = combo
+                best_strategy = combo
+                best_result = result
         
-        if best_config is None:
-            logger.info(f"OPTIMIZE {symbol}: no better config found")
+        if best_strategy is None:
+            logger.info(f"OPTIMIZE {symbol}: no better strategy config found")
             return None
         
-        # Check parameter delta from baseline
+        # Test trailing params with best strategy
+        best_trailing = current_trailing.copy()
+        best_overall_pf = best_pf
+        
+        for tc in generate_param_combos(TRAILING_RANGES, max_combos=15):
+            test_trailing = {**current_trailing, **tc}
+            test_params = {**current_params, **best_strategy}
+            result = run_walk_forward(df, test_params, current_filters, test_trailing)
+            if result and result['avg_pf'] > best_overall_pf and result['min_pf'] >= 1.0:
+                best_overall_pf = result['avg_pf']
+                best_trailing = test_trailing
+                best_result = result
+        
+        # Guard rails
         baseline_params = self.baseline.get('assets', [{}])[0].get('config', {}).get('strategy', BASELINE_PARAMS)
-        delta = param_delta(best_config, baseline_params)
+        delta = param_delta(best_strategy, baseline_params)
         
         if delta > self.max_param_delta:
-            logger.warning(f"OPTIMIZE {symbol}: best config too far from baseline "
-                          f"(delta={delta:.2f} > {self.max_param_delta}). Skipping.")
-            self._log_optimization(symbol, best_config, best_pf, delta, rejected=True,
-                                  reason="param_delta_too_high")
+            logger.warning(f"OPTIMIZE {symbol}: too far from baseline (delta={delta:.2f}). Skipping.")
+            self._log(symbol, best_strategy, best_trailing, best_result, delta, rejected=True,
+                     reason="param_delta_too_high")
             return None
         
-        # Apply improvement threshold
+        # Improvement check (soft — compare against current live PF, not walk-forward)
         current_avg_pf = self._get_current_pf(symbol)
         improvement = (best_pf - current_avg_pf) / current_avg_pf if current_avg_pf > 0 else 0
         
@@ -262,37 +316,54 @@ class AutoOptimizer:
             logger.info(f"OPTIMIZE {symbol}: improvement {improvement:.1%} < {self.min_improvement:.1%}. Skipping.")
             return None
         
-        logger.info(f"OPTIMIZE {symbol}: FOUND BETTER CONFIG — PF {current_avg_pf:.2f} -> {best_pf:.2f} "
+        # Trade count guard: reject if trades drop > 50% UNLESS PF improves significantly
+        if best_result and current_trades > 0:
+            trade_drop = 1 - (best_result['total_trades'] / current_trades)
+            if trade_drop > self.max_trade_drop and improvement < 0.20:
+                logger.info(f"OPTIMIZE {symbol}: trades dropped {trade_drop:.0%} without 20%+ PF gain. Skipping.")
+                self._log(symbol, best_strategy, best_trailing, best_result, delta, rejected=True,
+                         reason=f"trade_drop_{trade_drop:.0%}_no_pf_gain")
+                return None
+        
+        logger.info(f"OPTIMIZE {symbol}: BETTER CONFIG — PF {current_avg_pf:.2f} -> {best_pf:.2f} "
                     f"(+{improvement:.1%}), delta={delta:.2f}")
         
-        self._log_optimization(symbol, best_config, best_pf, delta, rejected=False,
-                              improvement=improvement)
+        self._log(symbol, best_strategy, best_trailing, best_result, delta, rejected=False,
+                 improvement=improvement)
+        self.last_optimize_time[symbol] = datetime.utcnow()
         
-        return best_config
+        return {'strategy': best_strategy, 'trailing': best_trailing}
+    
+    def get_regime_params(self, symbol: str, regime: str, 
+                         base_params: dict) -> dict:
+        """Get params adapted for current market regime."""
+        overrides = REGIME_OVERRIDES.get(regime, {})
+        return {**base_params, **overrides}
     
     def _get_current_pf(self, symbol: str) -> float:
-        """Get current PF from Redis or return 1.0."""
+        """Get current PF from Redis."""
         if self.redis:
             try:
-                stats = self.redis.load_trade_stats(symbol)
-                if stats and stats.get('total_trades', 0) > 0:
-                    wins = stats.get('wins', 0)
-                    losses = stats.get('losses', 0)
+                state = self.redis.load_risk_state()
+                if state:
+                    wins = state.get('total_wins', 0)
+                    losses = state.get('total_losses', 0)
                     if losses > 0:
-                        return (wins * 1.0) / (losses * 1.0)  # Simplified
+                        return wins / losses
             except:
                 pass
-        return 1.5  # Default assumption
+        return 1.5
     
-    def _log_optimization(self, symbol: str, params: dict, pf: float, 
-                         delta: float, rejected: bool = False, 
-                         improvement: float = 0, reason: str = ""):
+    def _log(self, symbol: str, strategy_params: dict, trailing_params: dict,
+            result: dict, delta: float, rejected: bool = False, 
+            improvement: float = 0, reason: str = ""):
         """Log optimization attempt."""
         entry = {
             'timestamp': datetime.utcnow().isoformat(),
             'symbol': symbol,
-            'new_params': params,
-            'new_pf': pf,
+            'strategy_params': strategy_params,
+            'trailing_params': trailing_params,
+            'result': result,
             'param_delta': delta,
             'rejected': rejected,
             'improvement': improvement,
@@ -300,11 +371,4 @@ class AutoOptimizer:
         }
         
         with open(self.log_path, 'a') as f:
-            f.write(f"{entry}\n")
-        
-        # Also save to Redis if available
-        if self.redis:
-            try:
-                self.redis.save_optimization_log(symbol, entry)
-            except:
-                pass
+            f.write(json.dumps(entry, default=str) + "\n")

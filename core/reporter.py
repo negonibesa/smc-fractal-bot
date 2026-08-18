@@ -197,8 +197,10 @@ class Reporter:
         regime_line = ""
         if regime_state:
             for sym, rs in regime_state.items():
-                r = rs.get('regime', 'unknown')
-                regime_line += f"  {sym}: {r}\n"
+                r = rs.get('regime', '?') if isinstance(rs, dict) else str(rs)
+                emoji_r = {'bull': '🟢', 'bear': '🔴', 'sideways': '🟡'}.get(r, '⚪')
+                adx = rs.get('adx', 0) if isinstance(rs, dict) else 0
+                regime_line += f"  {sym}: {emoji_r} {r} (ADX {adx:.0f})\n"
 
         pf_status = ""
         if rolling_pf is not None:
@@ -291,7 +293,10 @@ class Reporter:
         regime_line = ""
         if regime_state:
             for sym, rs in regime_state.items():
-                regime_line += f"  {sym}: {rs.get('regime', '?')}\n"
+                r = rs.get('regime', '?') if isinstance(rs, dict) else str(rs)
+                emoji_r = {'bull': '🟢', 'bear': '🔴', 'sideways': '🟡'}.get(r, '⚪')
+                adx = rs.get('adx', 0) if isinstance(rs, dict) else 0
+                regime_line += f"  {sym}: {emoji_r} {r} (ADX {adx:.0f})\n"
 
         text = (
             f"📊 <b>WEEKLY REPORT — {week_start.strftime('%b %d')} → {now.strftime('%b %d')}</b>\n"
@@ -377,7 +382,10 @@ class Reporter:
         regime_line = ""
         if regime_state:
             for sym, rs in regime_state.items():
-                regime_line += f"  {sym}: {rs.get('regime', '?')}\n"
+                r = rs.get('regime', '?') if isinstance(rs, dict) else str(rs)
+                emoji_r = {'bull': '🟢', 'bear': '🔴', 'sideways': '🟡'}.get(r, '⚪')
+                adx = rs.get('adx', 0) if isinstance(rs, dict) else 0
+                regime_line += f"  {sym}: {emoji_r} {r} (ADX {adx:.0f})\n"
 
         text = (
             f"📊 <b>BOT STATUS</b>\n"

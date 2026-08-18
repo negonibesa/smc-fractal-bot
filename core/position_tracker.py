@@ -278,12 +278,15 @@ class PositionTracker:
                 'exit_time': time.time(),
                 'max_pnl_risk': pos.highest_pnl_risk,
             }
-            self.close_position(symbol, pnl)
+            self.close_position(symbol, pnl, exit_price=exit_price,
+                                exit_reason=exit_reason, size=pos.size)
             return result
         
         return None
     
-    def close_position(self, symbol: str, pnl: float = 0) -> Optional[Position]:
+    def close_position(self, symbol: str, pnl: float = 0,
+                       exit_price: float = 0, exit_reason: str = "",
+                       size: float = 0) -> Optional[Position]:
         """Закрыть и удалить позицию."""
         pos = self.positions.pop(symbol, None)
         if pos:
@@ -292,8 +295,12 @@ class PositionTracker:
                 'side': pos.side,
                 'entry': pos.entry_price,
                 'entry_time': pos.entry_time,
+                'exit_price': exit_price if exit_price else pos.entry_price,
+                'exit_reason': exit_reason,
+                'size': size if size else pos.size,
                 'pnl': pnl,
                 'close_time': time.time(),
+                'max_pnl_risk': pos.highest_pnl_risk,
             }
             self.closed_trades.append(trade)
             self._save_trade(trade)

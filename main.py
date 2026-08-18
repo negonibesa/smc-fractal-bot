@@ -21,6 +21,7 @@ from core import BybitClient, OrderExecutor, RiskManager, PositionTracker, Teleg
 from core.redis_store import RedisStore
 from core.auto_optimizer import AutoOptimizer
 from core.regime_detector import detect_regime, adapt_params_for_regime
+from core.reporter import Reporter
 from smc_features import find_consolidation_center, detect_sweep, calculate_adx
 
 load_dotenv()
@@ -278,6 +279,7 @@ class SMCFractalBot:
     def __init__(self, config: dict):
         self.config = config
         self.running = False
+        self._tg_offset = 0  # Telegram getUpdates offset
         
         # Redis store
         self.redis = None
@@ -341,6 +343,9 @@ class SMCFractalBot:
         self.optimizer = AutoOptimizer(config, redis_store=self.redis)
         self.start_time = datetime.utcnow()
         self.last_optimize_check = {}
+        
+        # Reporter (daily/weekly reports)
+        self.reporter = Reporter(redis_store=self.redis, notifier=self.notifier)
         
         # Regime state per symbol
         self.regime_state = {}
@@ -579,6 +584,47 @@ class SMCFractalBot:
                     logger.error(f"Order failed: {result.message}")
                     self.notifier.send_error(result.message, f"Entry {symbol}")
     
+    def _check_telegram_commands(self):
+        """Poll Telegram for /report and /weekly commands."""
+        if not self.notifier.enabled:
+            return
+        try:
+            import requests as req
+            url = f"https://api.telegram.org/bot{self.notifier.bot_token}/getUpdates"
+            resp = req.get(url, params={'offset': self._tg_offset, 'timeout': 1}, timeout=5)
+            if resp.status_code != 200:
+                return
+            data = resp.json()
+            for update in data.get('result', []):
+                self._tg_offset = update['update_id'] + 1
+                msg = update.get('message', {})
+                text = msg.get('text', '').strip().lower()
+                chat = str(msg.get('chat', {}).get('id', ''))
+                if chat != self.notifier.chat_id:
+                    continue
+
+                if text == '/report':
+                    balance = self.client.get_wallet_balance()
+                    equity = float(balance.get('totalEquity', 0)) if balance else 0
+                    risk_status = self.risk.get_status()
+                    report = self.reporter.build_status_report(
+                        equity, self.tracker.positions, risk_status, self.regime_state)
+                    self.notifier._send(report)
+                elif text == '/weekly':
+                    balance = self.client.get_wallet_balance()
+                    equity = float(balance.get('totalEquity', 0)) if balance else 0
+                    report = self.reporter.build_weekly_report(
+                        equity, self.tracker.positions, self.regime_state)
+                    self.notifier._send(report)
+                elif text == '/daily':
+                    balance = self.client.get_wallet_balance()
+                    equity = float(balance.get('totalEquity', 0)) if balance else 0
+                    report = self.reporter.build_daily_report(
+                        equity, self.tracker.positions, self.regime_state)
+                    self.notifier._send(report)
+        except Exception as e:
+            logger.debug(f"TG command poll error: {e}")
+
     def run(self):
         """Основной цикл."""
         logger.info("="*60)
@@ -597,6 +643,7 @@ class SMCFractalBot:
         
         # Daily report tracker
         last_report_day = datetime.utcnow().date()
+        last_week_report_day = None
         
         # Set leverage for all symbols
         for symbol in self.symbols:
@@ -617,19 +664,21 @@ class SMCFractalBot:
                     logger.error(f"Cycle error {symbol}: {e}", exc_info=True)
                     self.notifier.send_error(str(e), f"Cycle {symbol}")
             
-            # Daily report at midnight UTC
+            # Daily report at 00:10 UTC, weekly on Sunday
             now = datetime.utcnow()
-            if now.date() > last_report_day:
-                risk_status = self.risk.get_status()
-                self.notifier.send_daily_report(
-                    trades_today=risk_status['daily_trades'],
-                    wins=risk_status['daily_wins'],
-                    losses=risk_status['daily_losses'],
-                    pnl_today=risk_status['daily_pnl'],
-                    equity=risk_status['equity'],
-                )
+            balance = self.client.get_wallet_balance()
+            equity = float(balance.get('totalEquity', 0)) if balance else 0
+
+            if now.date() > last_report_day and now.hour == 0 and now.minute < 10:
+                self.reporter.send_daily(equity, self.tracker.positions, self.regime_state)
                 self.risk.reset_daily()
                 last_report_day = now.date()
+
+            # Weekly report on Sunday
+            if now.weekday() == 6 and (last_week_report_day is None or now.date() != last_week_report_day):
+                if now.hour == 0 and now.minute < 10:
+                    self.reporter.send_weekly(equity, self.tracker.positions, self.regime_state)
+                    last_week_report_day = now.date()
             
             # Auto-optimization check (once per day per symbol)
             days_running = (now - self.start_time).total_seconds() / 86400
@@ -666,6 +715,9 @@ class SMCFractalBot:
                                 }
                                 self.signal_gens[symbol] = SignalGenerator(sym_config)
                                 
+                                # Log for weekly report
+                                self.reporter.log_optimization(symbol, current_params, result['strategy'])
+                                
                                 logger.info(f"APPLIED NEW CONFIG for {symbol}: {result}")
                                 self.notifier.send_error(
                                     f"Auto-optimized {symbol}: PF improvement",
@@ -675,6 +727,9 @@ class SMCFractalBot:
                     self.last_optimize_check[symbol] = now
                 except Exception as e:
                     logger.error(f"Auto-opt check failed for {symbol}: {e}")
+            
+            # Check Telegram commands
+            self._check_telegram_commands()
             
             # Ждём до следующей 4H свечи
             now = datetime.utcnow()

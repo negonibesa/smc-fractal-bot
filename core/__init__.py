@@ -4,5 +4,8 @@ from .risk_manager import RiskManager
 from .position_tracker import PositionTracker, Position
 from .notifier import TelegramNotifier
 from .redis_store import RedisStore
+from .auto_optimizer import AutoOptimizer
+from .regime_detector import detect_regime, adapt_params_for_regime
 
-__all__ = ['BybitClient', 'OrderExecutor', 'RiskManager', 'PositionTracker', 'Position', 'TelegramNotifier', 'RedisStore']
+__all__ = ['BybitClient', 'OrderExecutor', 'RiskManager', 'PositionTracker', 'Position', 
+           'TelegramNotifier', 'RedisStore', 'AutoOptimizer', 'detect_regime', 'adapt_params_for_regime']

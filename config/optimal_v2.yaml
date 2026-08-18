@@ -1,0 +1,134 @@
+# SMC FRACTAL BOT — OPTIMAL CONFIG (v2)
+# Saved: 2026-08-19
+# Walk-forward validated. DO NOT OVERWRITE without re-testing.
+#
+# RESULTS (OOS walk-forward):
+#   BNB:    PF=4.87  WR=70%  Ret=+8%   DD=1.1%  (ROBUST, no extra filters)
+#   RENDER: PF=3.39  WR=48%  Ret=+25%  DD=2.0%  (ROBUST, +session filter)
+#   FIL:    PF=1.56  WR=46%  Ret=+7%   DD=2.3%  (GOOD, +trend_1d filter)
+#
+# v2 CHANGES (tested 2026-08-19):
+#   Session filter (London+NY 8-21 UTC): helped RENDER (+103% PF)
+#   1D trend filter (EMA50): helped FIL (+27% PF)
+#   Volume filter: REJECTED (too aggressive, kills BNB/RENDER)
+#   Fixed center: ALREADY IN BOT (no change needed)
+#
+# REJECTED FILTERS (don't re-add without testing):
+#   volume_filter: kills BNB PF from 16->1.8, RENDER 1.36->0.38
+#   session_filter on BNB: kills trades (46->34), PF drops
+#   trend_1d on RENDER: hurts (1.36->1.14)
+
+strategy:
+  lookback: 12
+  sweep_threshold: 0.008
+  center_proximity: 0.012
+  tp_multiplier: 1.0
+  timeout: 15
+
+trailing:
+  enabled: true
+  breakeven_at: 0.5
+  trail_activate: 1.0
+  trail_step: 0.5
+
+risk:
+  risk_percent: 1.0
+  commission: 0.001
+  slippage: 0.0005
+  stop_buffer: 0.002
+
+filters:
+  adx_filter:
+    enabled: true
+    min_adx: 25
+
+assets:
+  - symbol: BNBUSDT
+    enabled: true
+    config:
+      strategy:
+        lookback: 12
+        sweep_threshold: 0.008
+        center_proximity: 0.012
+        tp_multiplier: 1.0
+        timeout: 15
+      filters:
+        adx_filter:
+          enabled: true
+          min_adx: 25
+      trailing:
+        enabled: true
+        breakeven_at: 0.5
+        trail_activate: 1.0
+        trail_step: 0.5
+
+  - symbol: RENDERUSDT
+    enabled: true
+    config:
+      strategy:
+        lookback: 12
+        sweep_threshold: 0.008
+        center_proximity: 0.012
+        tp_multiplier: 1.0
+        timeout: 15
+      filters:
+        adx_filter:
+          enabled: true
+          min_adx: 25
+        session_filter:
+          enabled: true
+      trailing:
+        enabled: true
+        breakeven_at: 0.5
+        trail_activate: 1.0
+        trail_step: 0.5
+
+  - symbol: FILUSDT
+    enabled: false  # Not live on Bybit testnet
+    config:
+      strategy:
+        lookback: 12
+        sweep_threshold: 0.008
+        center_proximity: 0.012
+        tp_multiplier: 1.0
+        timeout: 15
+      filters:
+        adx_filter:
+          enabled: true
+          min_adx: 25
+        trend_1d_filter:
+          enabled: true
+      trailing:
+        enabled: true
+        breakeven_at: 0.5
+        trail_activate: 1.0
+        trail_step: 0.5
+
+notifications:
+  telegram:
+    enabled: true
+    bot_token: ""
+    chat_id: ""
+
+optimizer:
+  trigger_days: 30
+  trigger_trades: 20
+  trigger_pf_drop: 1.2
+  optimize_params:
+    - lookback
+    - sweep_threshold
+    - center_proximity
+    - tp_multiplier
+    - timeout
+  param_ranges:
+    lookback: [8, 12]
+    sweep_threshold: [0.005, 0.008, 0.012]
+    center_proximity: [0.005, 0.008, 0.012]
+    tp_multiplier: [1.0, 2.0]
+    timeout: [6, 15]
+  min_improvement: 0.10
+  # Grok's recommendations for auto-opt:
+  # 1. Walk-forward validate any new config before applying
+  # 2. Never let params drift far from this optimal baseline
+  # 3. Log parameter deltas (red flag if jump > 50%)
+  # 4. Keep backup of this file, never auto-overwrite

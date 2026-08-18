@@ -1,3 +1,19 @@
+strategy:
+  center_proximity: 0.012
+  lookback: 12
+  sweep_threshold: 0.008
+  timeout: 15
+  tp_multiplier: 1.0
+trailing:
+  breakeven_at: 0.5
+  enabled: true
+  trail_activate: 1.0
+  trail_step: 0.5
+risk:
+  commission: 0.001
+  risk_percent: 1.0
+  slippage: 0.0005
+  stop_buffer: 0.002
 filters:
   adx_filter:
     enabled: true
@@ -10,46 +26,8 @@ filters:
   vwap_filter:
     enabled: false
 results:
-  drawdown: !!python/object/apply:numpy._core.multiarray.scalar
-  - &id001 !!python/object/apply:numpy.dtype
-    args:
-    - f8
-    - false
-    - true
-    state: !!python/tuple
-    - 3
-    - <
-    - null
-    - null
-    - null
-    - -1
-    - -1
-    - 0
-  - !!binary |
-    i2zn+6nxkj8=
-  pf: !!python/object/apply:numpy._core.multiarray.scalar
-  - *id001
-  - !!binary |
-    H4XrUbgeEkA=
-  return: !!python/object/apply:numpy._core.multiarray.scalar
-  - *id001
-  - !!binary |
-    LSEf9GxW0T8=
+  pf: 4.53
+  return: 0.2709
+  win_rate: 0.70
   trades: 46
-  win_rate: 0.7
-risk:
-  commission: 0.001
-  risk_percent: 1.0
-  slippage: 0.0005
-  stop_buffer: 0.002
-strategy:
-  center_proximity: 0.012
-  lookback: 12
-  sweep_threshold: 0.008
-  timeout: 15
-  tp_multiplier: 1.0
-trailing:
-  breakeven_at: 0.5
-  enabled: true
-  trail_activate: 1.0
-  trail_step: 0.5
+  drawdown: 0.0185

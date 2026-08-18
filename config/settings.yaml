@@ -1,0 +1,84 @@
+# SMC FRACTAL BOT — CONFIGURATION
+# Toggle features on/off, optimizer will test all combinations
+
+# ─── STRATEGY PARAMETERS ───────────────────────────────────────
+strategy:
+  # Core sweep detection
+  lookback: 8              # Candles for consolidation center
+  sweep_threshold: 0.005   # 0.5% — sweep detection threshold
+  center_proximity: 0.012  # 1.2% — return to center threshold
+  tp_multiplier: 1.0       # Take profit = risk * 1.0
+  timeout: 15              # Max candles to wait for return
+
+# ─── TRAILING STOP ──────────────────────────────────────────────
+trailing:
+  enabled: true
+  breakeven_at: 0.5        # Move to BE after 0.5x risk profit
+  trail_activate: 1.0      # Start trailing after 1.0x risk profit
+  trail_step: 0.5          # Trail by 0.5x risk
+
+# ─── RISK MANAGEMENT ───────────────────────────────────────────
+risk:
+  risk_percent: 1.0        # 1% per trade
+  commission: 0.001        # 0.1%
+  slippage: 0.0005         # 0.05%
+  stop_buffer: 0.002       # 0.2% buffer on stop
+
+# ─── ON/OFF TOGGLES (for auto-optimizer) ────────────────────────
+filters:
+  # Each filter can be toggled on/off
+  # Optimizer tests all 2^N combinations
+  adx_filter:
+    enabled: false
+    min_adx: 25
+  vwap_filter:
+    enabled: false
+  session_filter:
+    enabled: false
+    # London: 07:00-16:00 UTC
+    # NY: 13:00-22:00 UTC
+  volume_filter:
+    enabled: false
+    volume_multiplier: 1.5  # Sweep volume must be > 1.5x average
+
+# ─── AUTO-OPTIMIZATION ──────────────────────────────────────────
+optimizer:
+  # When to run optimization
+  trigger_days: 30         # Run every 30 days
+  trigger_trades: 20       # Or after 20 trades
+  trigger_pf_drop: 1.2     # Or if PF drops below 1.2
+  
+  # What to optimize (on/off only)
+  optimize_params:
+    - lookback
+    - sweep_threshold
+    - center_proximity
+    - tp_multiplier
+    - timeout
+  
+  # Parameter ranges
+  param_ranges:
+    lookback: [8, 12]
+    sweep_threshold: [0.005, 0.008, 0.012]
+    center_proximity: [0.005, 0.008, 0.012]
+    tp_multiplier: [1.0, 2.0]
+    timeout: [6, 15]
+  
+  # Improvement threshold
+  min_improvement: 0.10    # New config must be 10% better
+
+# ─── ASSETS ─────────────────────────────────────────────────────
+assets:
+  - symbol: BNBUSDT
+    enabled: true
+    data_file: data/raw/BNBUSDT_4h_12m.csv
+  - symbol: BTCUSDT
+    enabled: false
+    data_file: data/raw/BTCUSDT_4h.csv
+
+# ─── NOTIFICATIONS ──────────────────────────────────────────────
+notifications:
+  telegram:
+    enabled: false
+    bot_token: ""
+    chat_id: ""

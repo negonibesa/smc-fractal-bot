@@ -18,7 +18,7 @@
 - ✅ Bybit V5 API (testnet)
 - ✅ Redis persistence (позиции, сделки, статистика, signal state)
 - ✅ Telegram уведомления + команды (/help)
-- ✅ Multi-pair: BNBUSDT, RENDERUSDT (FILUSDT on mainnet)
+- ✅ Multi-pair: BNBUSDT, RENDERUSDT, XRPUSDT
 - ✅ Walk-forward validated (ROBUST)
 - ✅ Автооптимизация v2 (walk-forward + guard rails + regime params)
 - ✅ Regime detector (bull/bear/sideways + adaptive params)
@@ -105,7 +105,7 @@ python main.py
 |------|--------|-----------|---------|---------|
 | BNBUSDT | **4.87** | +8.0% | ROBUST | ADX only |
 | RENDERUSDT | **2.76** | +13.1% | ROBUST | +session (8-21 UTC) |
-| FILUSDT | **1.43** | +4.9% | GOOD | +1D trend EMA50 |
+| XRPUSDT | **85.52** | +9.3% | ROBUST | +session +1D trend EMA50 |
 
 ### Per-pair конфигурация
 

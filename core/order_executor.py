@@ -15,6 +15,8 @@ class OrderResult:
     order_id: str = ""
     message: str = ""
     fill_price: float = 0.0
+    filled_qty: float = 0.0
+    sl_tp_ok: bool = True
 
 
 class OrderExecutor:
@@ -108,7 +110,21 @@ class OrderExecutor:
             sl_str = self._round_price(stop, inst['tick_size'])
             tp_str = self._round_price(tp, inst['tick_size'])
             opposite_side = "Sell" if side == "Buy" else "Buy"
+
+            # Validate TP vs current price
+            current_price = float(self.client.get_ticker(symbol).get('lastPrice', 0))
+            if side == "Buy" and current_price > 0:
+                min_tp = current_price * 1.001  # 0.1% above current
+                if float(tp_str) < min_tp:
+                    tp_str = self._round_price(min_tp, inst['tick_size'])
+                    logger.info(f"TP adjusted for BUY: {tp_str} (was below current {current_price})")
+            elif side == "Sell" and current_price > 0:
+                max_tp = current_price * 0.999  # 0.1% below current
+                if float(tp_str) > max_tp:
+                    tp_str = self._round_price(max_tp, inst['tick_size'])
+                    logger.info(f"TP adjusted for SELL: {tp_str} (was above current {current_price})")
             
+            sl_tp_ok = True
             try:
                 self.client.set_trading_stop(
                     symbol,
@@ -120,9 +136,23 @@ class OrderExecutor:
                 logger.info(f"SL={sl_str} TP={tp_str}")
             except Exception as e:
                 logger.warning(f"SL/TP via set_trading_stop failed, using conditional: {e}")
-                self._place_conditional_sl_tp(symbol, opposite_side, qty_str, sl_str, tp_str, inst)
+                try:
+                    self._place_conditional_sl_tp(symbol, opposite_side, qty_str, sl_str, tp_str, inst)
+                except Exception as e2:
+                    logger.error(f"Conditional SL/TP also failed: {e2}")
+                    sl_tp_ok = False
             
-            return OrderResult(True, order_id=order_id, message=f"Opened {side} {qty_str}")
+            if not sl_tp_ok:
+                logger.error(f"SL/TP FAILED for {symbol} — closing position immediately")
+                try:
+                    close_side = opposite_side
+                    self.client.place_market_order(symbol, close_side, qty_str, reduce_only=True)
+                    logger.info(f"Emergency close OK: {symbol}")
+                except Exception as e3:
+                    logger.error(f"Emergency close FAILED: {e3} — position NAKED on exchange!")
+                    return OrderResult(False, order_id=order_id, message=f"Naked position! SL/TP and close both failed", filled_qty=float(qty_str), sl_tp_ok=False)
+            
+            return OrderResult(True, order_id=order_id, message=f"Opened {side} {qty_str}", filled_qty=float(qty_str), sl_tp_ok=sl_tp_ok)
         
         except Exception as e:
             logger.error(f"Entry failed: {e}")

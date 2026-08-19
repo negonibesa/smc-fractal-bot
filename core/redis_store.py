@@ -50,10 +50,12 @@ class RedisStore:
     # ─── POSITIONS ──────────────────────────────────────────────
 
     def save_position(self, symbol: str, pos_dict: dict):
-        """Save open position to Redis."""
+        """Save open position to Redis (atomic)."""
         key = self._key("pos:{symbol}", symbol=symbol)
-        self.r.set(key, json.dumps(pos_dict))
-        self.r.sadd(self._key("pos:index"), symbol)
+        pipe = self.r.pipeline()
+        pipe.set(key, json.dumps(pos_dict))
+        pipe.sadd(self._key("pos:index"), symbol)
+        pipe.execute()
         logger.debug(f"Redis SAVE position {symbol}")
 
     def load_position(self, symbol: str) -> Optional[dict]:
@@ -75,10 +77,12 @@ class RedisStore:
         return result
 
     def delete_position(self, symbol: str):
-        """Remove position from Redis."""
+        """Remove position from Redis (atomic)."""
         key = self._key("pos:{symbol}", symbol=symbol)
-        self.r.delete(key)
-        self.r.srem(self._key("pos:index"), symbol)
+        pipe = self.r.pipeline()
+        pipe.delete(key)
+        pipe.srem(self._key("pos:index"), symbol)
+        pipe.execute()
         logger.debug(f"Redis DELETE position {symbol}")
 
     def clear_all_positions(self):

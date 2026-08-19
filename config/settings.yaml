@@ -140,20 +140,42 @@ assets:
 
   - symbol: LINKUSDT
     enabled: true
-    data_file: data/raw/LINKUSDT_4h_4y.csv
-    # LINK 4Y: PF=3.09, annual +31%, DD=5.3% (425 trades)
-    # Best PF every year: 2023 PF=2.44, 2024 PF=4.40, 2025 PF=2.05, 2026 PF=1.62
+    lock_config: true
+    # LINK 12M optimized: PF=7.58, WR=52%, 23 trades
+    # Optimized config: lb=12 sw=0.005 prox=0.012 tp=1.0 tmo=15 ADX=30
     config:
       strategy:
         lookback: 12
-        sweep_threshold: 0.008
+        sweep_threshold: 0.005
         center_proximity: 0.012
         tp_multiplier: 1.0
         timeout: 15
       filters:
         adx_filter:
           enabled: true
-          min_adx: 25
+          min_adx: 30
+      trailing:
+        enabled: true
+        breakeven_at: 0.5
+        trail_activate: 1.0
+        trail_step: 0.5
+
+  - symbol: DOGEUSDT
+    enabled: true
+    lock_config: true
+    # DOGE 12M: PF=3.07, PnL=+$1204, DD=1.1% (29 trades)
+    # Optimized config: lb=8 sw=0.005 prox=0.012 tp=1.0 tmo=15 ADX=30
+    config:
+      strategy:
+        lookback: 8
+        sweep_threshold: 0.005
+        center_proximity: 0.012
+        tp_multiplier: 1.0
+        timeout: 15
+      filters:
+        adx_filter:
+          enabled: true
+          min_adx: 30
       trailing:
         enabled: true
         breakeven_at: 0.5
@@ -163,6 +185,6 @@ assets:
 # ─── NOTIFICATIONS ──────────────────────────────────────────
 notifications:
   telegram:
-    enabled: true
+    enabled: false
     bot_token: ""
     chat_id: ""

@@ -32,22 +32,32 @@ class RiskManager:
                  slippage: float = 0.0005, stop_buffer: float = 0.002,
                  redis_store=None,
                  dynamic_risk_enabled: bool = False,
-                 default_risk: float = 1.5,
-                 reduced_risk: float = 1.0,
-                 dd_threshold: float = 10.0):
+                 base_risk: float = 1.5,
+                 min_risk: float = 0.75,
+                 max_risk: float = 2.0,
+                 dd_threshold_1: float = 6.0,
+                 dd_threshold_2: float = 10.0,
+                 pf_hot: float = 2.0,
+                 pf_window: int = 20):
         """
         Args:
-            risk_percent: Риск на сделку (% от equity)
-            max_drawdown: Макс просадка (% — стоп торговли)
             dynamic_risk_enabled: Включить auto-risk adjustment
-            default_risk: Основной risk% (когда DD < threshold)
-            reduced_risk: Сниженный risk% (когда DD > threshold)
-            dd_threshold: Порог DD для снижения risk (%)
+            base_risk: Базовый risk% (1.5)
+            min_risk: Минимальный risk% при DD>10% (0.75)
+            max_risk: Максимальный risk% при hot streak (2.0)
+            dd_threshold_1: DD > 6% → risk = 1.0
+            dd_threshold_2: DD > 10% → risk = 0.75
+            pf_hot: PF(20) > 2.0 + DD<3% → risk = 2.0
+            pf_window: Окно для расчёта PF (20 сделок)
         """
         self.risk_percent = risk_percent
-        self.default_risk = default_risk
-        self.reduced_risk = reduced_risk
-        self.dd_threshold = dd_threshold
+        self.base_risk = base_risk
+        self.min_risk = min_risk
+        self.max_risk = max_risk
+        self.dd_threshold_1 = dd_threshold_1
+        self.dd_threshold_2 = dd_threshold_2
+        self.pf_hot = pf_hot
+        self.pf_window = pf_window
         self.dynamic_risk_enabled = dynamic_risk_enabled
         self.max_drawdown = max_drawdown
         self.max_daily_loss = max_daily_loss
@@ -346,7 +356,7 @@ class RiskManager:
         }
     
     def get_current_risk(self) -> float:
-        """Получить текущий risk% с учётом DD circuit breaker."""
+        """Получить текущий risk% с учётом DD + PF dynamic risk."""
         if not self.dynamic_risk_enabled:
             return self.risk_percent
         
@@ -354,6 +364,36 @@ class RiskManager:
         if self.peak_equity > 0 and self.initial_equity > 0:
             dd = (self.peak_equity - self._current_equity()) / self.peak_equity * 100
         
-        if dd > self.dd_threshold:
-            return self.reduced_risk
-        return self.default_risk
+        risk = self.base_risk
+        
+        # DD circuit breaker
+        if dd > self.dd_threshold_2:
+            risk = self.min_risk
+        elif dd > self.dd_threshold_1:
+            risk = 1.0
+        
+        # PF hot streak bonus: PF(20) > 2.0 + DD < 3% → risk up
+        pf_20 = self._get_pf_last_n(self.pf_window)
+        if pf_20 > self.pf_hot and dd < 3.0:
+            risk = self.max_risk
+        
+        risk = max(self.min_risk, min(risk, self.max_risk))
+        return round(risk, 2)
+    
+    def _get_pf_last_n(self, n: int = 20) -> float:
+        """PF за последние N сделок."""
+        if not self.redis:
+            return 0
+        try:
+            trades = self.redis.load_closed_trades()
+            if not trades or len(trades) < 2:
+                return 0
+            recent = trades[-n:]
+            wins = sum(1 for t in recent if t.get('pnl', 0) > 0)
+            total_win = sum(t.get('pnl', 0) for t in recent if t.get('pnl', 0) > 0)
+            total_loss = abs(sum(t.get('pnl', 0) for t in recent if t.get('pnl', 0) <= 0))
+            if total_loss == 0:
+                return float('inf') if total_win > 0 else 0
+            return total_win / total_loss
+        except Exception:
+            return 0

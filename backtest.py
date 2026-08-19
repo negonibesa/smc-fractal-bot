@@ -20,12 +20,10 @@ def run_backtest(
     trailing_activate: float = 1.0, # Activate trailing after 1.0x risk in profit
     trailing_step: float = 0.5,     # Trail by 0.5x risk
     max_leverage: float = 20.0,     # Max leverage cap
-    dynamic_risk: dict = None,      # {default_risk, reduced_risk, dd_threshold}
+    dynamic_risk: dict = None,      # {base_risk, min_risk, max_risk, dd_t1, dd_t2, pf_hot, pf_window}
 ) -> Tuple[List[dict], dict]:
     """
-    Бэктест с trailing stop, breakeven и dynamic risk:
-    - dynamic_risk: auto-reduce risk when drawdown exceeds threshold
-      {default_risk: 1.5, reduced_risk: 1.0, dd_threshold: 10}
+    Бэктест с trailing stop, breakeven и dynamic risk (DD + PF).
     """
     trades = []
     balance = initial_balance
@@ -38,6 +36,15 @@ def run_backtest(
     direction = None
     original_stop = 0
     highest_pnl = 0  # track max profit in risk units
+    
+    # Dynamic risk params
+    dr_base = dynamic_risk.get('base_risk', 1.5) if dynamic_risk else risk_percent
+    dr_min = dynamic_risk.get('min_risk', 0.75) if dynamic_risk else risk_percent
+    dr_max = dynamic_risk.get('max_risk', 2.0) if dynamic_risk else risk_percent
+    dr_dd1 = dynamic_risk.get('dd_threshold_1', 6.0) if dynamic_risk else 999
+    dr_dd2 = dynamic_risk.get('dd_threshold_2', 10.0) if dynamic_risk else 999
+    dr_pf_hot = dynamic_risk.get('pf_hot', 2.0) if dynamic_risk else 999
+    dr_pf_window = dynamic_risk.get('pf_window', 20) if dynamic_risk else 20
     
     signals_dict = {}
     for s in signals:
@@ -163,15 +170,26 @@ def run_backtest(
         
         # ─── Entry ───────────────────────────────────────────────────
         if position == 0 and signal is not None:
-            # Dynamic risk: reduce if drawdown exceeds threshold
+            # Dynamic risk: DD + PF based
             current_risk = risk_percent
             if dynamic_risk:
                 peak_balance = max(peak_balance, balance)
                 dd_pct = (peak_balance - balance) / peak_balance * 100 if peak_balance > 0 else 0
-                if dd_pct > dynamic_risk.get('dd_threshold', 10):
-                    current_risk = dynamic_risk.get('reduced_risk', 1.0)
-                else:
-                    current_risk = dynamic_risk.get('default_risk', risk_percent)
+                
+                current_risk = dr_base
+                
+                # DD circuit breaker
+                if dd_pct > dr_dd2:
+                    current_risk = dr_min
+                elif dd_pct > dr_dd1:
+                    current_risk = 1.0
+                
+                # PF hot streak bonus
+                pf_20 = _calc_pf_last_n(trades, dr_pf_window)
+                if pf_20 > dr_pf_hot and dd_pct < 3.0:
+                    current_risk = dr_max
+                
+                current_risk = max(dr_min, min(current_risk, dr_max))
 
             signal_type = signal.get('direction') or signal.get('signal')
             if signal_type in ['BUY', 'LONG']:
@@ -328,3 +346,17 @@ def save_backtest_report(metrics: dict, trades: List[dict], save_path: str):
             f.write(f"  Exit: {trade['exit_time']} @ {trade['exit_price']:.2f}\n")
             f.write(f"  PnL: ${trade['pnl']:.2f}\n\n")
     logger.info(f"Backtest report saved to {save_path}")
+
+
+def _calc_pf_last_n(trades: List[dict], n: int = 20) -> float:
+    """PF за последние N сделок."""
+    if len(trades) < 2:
+        return 0
+    recent = trades[-n:]
+    wins = [t for t in recent if t.get('pnl', 0) > 0]
+    losses = [t for t in recent if t.get('pnl', 0) <= 0]
+    total_win = sum(t['pnl'] for t in wins) if wins else 0
+    total_loss = abs(sum(t['pnl'] for t in losses)) if losses else 0
+    if total_loss == 0:
+        return float('inf') if total_win > 0 else 0
+    return total_win / total_loss

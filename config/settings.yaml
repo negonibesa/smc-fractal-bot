@@ -23,12 +23,16 @@ risk:
   slippage: 0.0005
   stop_buffer: 0.002
 
-# ─── DYNAMIC RISK (circuit breaker) ────────────────────────
+# ─── DYNAMIC RISK (DD + PF) ────────────────────────────────
 dynamic_risk:
   enabled: true
-  default_risk: 1.5      # Normal risk when DD ≤ threshold
-  reduced_risk: 1.0      # Reduced risk when DD > threshold
-  dd_threshold: 10.0     # Drawdown % to trigger reduction
+  base_risk: 1.5         # Default risk
+  min_risk: 0.75         # Floor when DD > 10%
+  max_risk: 2.0          # Ceiling when PF(20) > 2.0 + DD < 3%
+  dd_threshold_1: 6.0    # DD > 6% → risk = 1.0
+  dd_threshold_2: 10.0   # DD > 10% → risk = 0.75
+  pf_hot: 2.0            # PF(20) > 2.0 + DD<3% → risk = 2.0
+  pf_window: 20          # Rolling window for PF calc
 
 # ─── FILTERS ───────────────────────────────────────────────
 filters:

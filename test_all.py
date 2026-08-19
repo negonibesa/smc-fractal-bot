@@ -111,7 +111,15 @@ def run_bt(df, params, trailing, filters_flags=None, df_1d=None):
         trailing_activate=trailing.get('trail_activate',1.0),
         trailing_step=trailing.get('trail_step',0.5),
         max_leverage=20,
-        dynamic_risk={'default_risk': 1.5, 'reduced_risk': 1.0, 'dd_threshold': 10})
+        dynamic_risk={
+            'base_risk': 1.5,
+            'min_risk': 0.75,
+            'max_risk': 2.0,
+            'dd_threshold_1': 6.0,
+            'dd_threshold_2': 10.0,
+            'pf_hot': 2.0,
+            'pf_window': 20,
+        })
     return metrics, signals
 
 # ─── RUN ALL PAIRS ──────────────────────────────────────────────

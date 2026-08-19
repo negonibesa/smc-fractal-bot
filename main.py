@@ -328,9 +328,13 @@ class SMCFractalBot:
             stop_buffer=config['risk']['stop_buffer'],
             redis_store=self.redis,
             dynamic_risk_enabled=config.get('dynamic_risk', {}).get('enabled', True),
-            default_risk=config.get('dynamic_risk', {}).get('default_risk', 1.5),
-            reduced_risk=config.get('dynamic_risk', {}).get('reduced_risk', 1.0),
-            dd_threshold=config.get('dynamic_risk', {}).get('dd_threshold', 10.0),
+            base_risk=config.get('dynamic_risk', {}).get('base_risk', 1.5),
+            min_risk=config.get('dynamic_risk', {}).get('min_risk', 0.75),
+            max_risk=config.get('dynamic_risk', {}).get('max_risk', 2.0),
+            dd_threshold_1=config.get('dynamic_risk', {}).get('dd_threshold_1', 6.0),
+            dd_threshold_2=config.get('dynamic_risk', {}).get('dd_threshold_2', 10.0),
+            pf_hot=config.get('dynamic_risk', {}).get('pf_hot', 2.0),
+            pf_window=config.get('dynamic_risk', {}).get('pf_window', 20),
         )
         self.executor = OrderExecutor(self.client, self.risk)
         self.tracker = PositionTracker(

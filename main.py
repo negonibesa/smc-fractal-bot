@@ -31,15 +31,25 @@ load_dotenv()
 LOG_DIR = Path(__file__).parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
+from logging.handlers import RotatingFileHandler
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler(LOG_DIR / "bot.log"),
+        RotatingFileHandler(LOG_DIR / "bot.log", maxBytes=5*1024*1024, backupCount=5),
     ]
 )
 logger = logging.getLogger("bot")
+
+# ─── CLEANUP OLD LOGS ON STARTUP ──────────────────────────────────
+import glob as _glob
+for old_log in _glob.glob(str(LOG_DIR / "bot.log.*")):
+    try:
+        Path(old_log).unlink()
+    except Exception:
+        pass
 
 # ─── CONFIG ────────────────────────────────────────────────────────
 

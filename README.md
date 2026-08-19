@@ -97,15 +97,23 @@ Start-Process "C:\Program Files\Redis\redis-server.exe" -WindowStyle Hidden
 python main.py
 ```
 
-## Результаты (Walk-Forward Validated)
+## Результаты (Walk-Forward + 12-Month Backtest)
 
-### Оптимальный конфиг (v2)
+### Walk-Forward Validation (OOS)
 
 | Pair | OOS PF | OOS Return | Вердикт | Фильтры |
 |------|--------|-----------|---------|---------|
 | BNBUSDT | **4.87** | +8.0% | ROBUST | ADX only |
 | RENDERUSDT | **2.76** | +13.1% | ROBUST | +session (8-21 UTC) |
 | XRPUSDT | **85.52** | +9.3% | ROBUST | +session +1D trend EMA50 |
+
+### 12-Month Backtest (max_leverage=20, compounding)
+
+| Pair | Period | Trades | WR | PF | Return | Max DD |
+|------|--------|--------|-----|------|--------|--------|
+| BNBUSDT | 12 mo | 93 | 45% | 2.09 | +28.2% | 4.97% |
+| RENDERUSDT | 25 mo | 146 | 48% | 8.76 | +98.8% | 2.29% |
+| XRPUSDT | 6 mo | 16 | 62% | 57.81 | +9.3% | 0.12% |
 
 ### Per-pair конфигурация
 

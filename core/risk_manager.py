@@ -30,20 +30,25 @@ class RiskManager:
                  max_daily_loss: float = 5.0, max_consecutive_losses: int = 3,
                  max_daily_trades: int = 20, commission: float = 0.001,
                  slippage: float = 0.0005, stop_buffer: float = 0.002,
-                 redis_store=None):
+                 redis_store=None,
+                 dynamic_risk_enabled: bool = False,
+                 default_risk: float = 1.5,
+                 reduced_risk: float = 1.0,
+                 dd_threshold: float = 10.0):
         """
         Args:
             risk_percent: Риск на сделку (% от equity)
             max_drawdown: Макс просадка (% — стоп торговли)
-            max_daily_loss: Макс дневной убыток (% — стоп на день)
-            max_consecutive_losses: Макс серия стопов подряд
-            max_daily_trades: Макс сделок в день
-            commission: Комиссия (0.1%)
-            slippage: Проскальзывание (0.05%)
-            stop_buffer: Буфер на стоп (0.2%)
-            redis_store: RedisStore instance for persistence
+            dynamic_risk_enabled: Включить auto-risk adjustment
+            default_risk: Основной risk% (когда DD < threshold)
+            reduced_risk: Сниженный risk% (когда DD > threshold)
+            dd_threshold: Порог DD для снижения risk (%)
         """
         self.risk_percent = risk_percent
+        self.default_risk = default_risk
+        self.reduced_risk = reduced_risk
+        self.dd_threshold = dd_threshold
+        self.dynamic_risk_enabled = dynamic_risk_enabled
         self.max_drawdown = max_drawdown
         self.max_daily_loss = max_daily_loss
         self.max_consecutive_losses = max_consecutive_losses
@@ -337,4 +342,18 @@ class RiskManager:
             'consecutive_losses': self.daily.consecutive_losses,
             'can_trade': self.can_trade()[0],
             'pause_reason': self._pause_reason,
+            'current_risk': self.get_current_risk(),
         }
+    
+    def get_current_risk(self) -> float:
+        """Получить текущий risk% с учётом DD circuit breaker."""
+        if not self.dynamic_risk_enabled:
+            return self.risk_percent
+        
+        dd = 0
+        if self.peak_equity > 0 and self.initial_equity > 0:
+            dd = (self.peak_equity - self._current_equity()) / self.peak_equity * 100
+        
+        if dd > self.dd_threshold:
+            return self.reduced_risk
+        return self.default_risk

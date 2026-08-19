@@ -327,6 +327,10 @@ class SMCFractalBot:
             slippage=config['risk']['slippage'],
             stop_buffer=config['risk']['stop_buffer'],
             redis_store=self.redis,
+            dynamic_risk_enabled=config.get('dynamic_risk', {}).get('enabled', True),
+            default_risk=config.get('dynamic_risk', {}).get('default_risk', 1.5),
+            reduced_risk=config.get('dynamic_risk', {}).get('reduced_risk', 1.0),
+            dd_threshold=config.get('dynamic_risk', {}).get('dd_threshold', 10.0),
         )
         self.executor = OrderExecutor(self.client, self.risk)
         self.tracker = PositionTracker(
@@ -576,7 +580,11 @@ class SMCFractalBot:
                     balance = self.client.get_wallet_balance()
                     equity = float(balance.get('totalEquity', 0))
                     inst = self.executor._get_instrument(symbol)
-                    size = self.risk.calculate_position_size(entry, stop, equity, qty_step=inst['qty_step'])
+                    size = self.risk.calculate_position_size(
+                        entry, stop, equity,
+                        risk_percent=self.risk.get_current_risk(),
+                        qty_step=inst['qty_step']
+                    )
                     
                     if size > 0:
                         self.tracker.open_position(symbol, direction, entry, size, stop, tp)

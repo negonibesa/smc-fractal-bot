@@ -23,6 +23,13 @@ risk:
   slippage: 0.0005
   stop_buffer: 0.002
 
+# ─── DYNAMIC RISK (circuit breaker) ────────────────────────
+dynamic_risk:
+  enabled: true
+  default_risk: 1.5      # Normal risk when DD ≤ threshold
+  reduced_risk: 1.0      # Reduced risk when DD > threshold
+  dd_threshold: 10.0     # Drawdown % to trigger reduction
+
 # ─── FILTERS ───────────────────────────────────────────────
 filters:
   adx_filter:

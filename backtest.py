@@ -20,15 +20,16 @@ def run_backtest(
     trailing_activate: float = 1.0, # Activate trailing after 1.0x risk in profit
     trailing_step: float = 0.5,     # Trail by 0.5x risk
     max_leverage: float = 20.0,     # Max leverage cap
+    dynamic_risk: dict = None,      # {default_risk, reduced_risk, dd_threshold}
 ) -> Tuple[List[dict], dict]:
     """
-    Бэктест с trailing stop и breakeven:
-    - breakeven_at: после Xx риска в прибыли, стоп = вход + commission
-    - trailing_activate: после Xx риска в прибыли, начинаем трейлить
-    - trailing_step: трейлим на Xx риска от текущей цены
+    Бэктест с trailing stop, breakeven и dynamic risk:
+    - dynamic_risk: auto-reduce risk when drawdown exceeds threshold
+      {default_risk: 1.5, reduced_risk: 1.0, dd_threshold: 10}
     """
     trades = []
     balance = initial_balance
+    peak_balance = initial_balance
     position = 0
     entry_price = 0
     stop_price = 0
@@ -162,6 +163,16 @@ def run_backtest(
         
         # ─── Entry ───────────────────────────────────────────────────
         if position == 0 and signal is not None:
+            # Dynamic risk: reduce if drawdown exceeds threshold
+            current_risk = risk_percent
+            if dynamic_risk:
+                peak_balance = max(peak_balance, balance)
+                dd_pct = (peak_balance - balance) / peak_balance * 100 if peak_balance > 0 else 0
+                if dd_pct > dynamic_risk.get('dd_threshold', 10):
+                    current_risk = dynamic_risk.get('reduced_risk', 1.0)
+                else:
+                    current_risk = dynamic_risk.get('default_risk', risk_percent)
+
             signal_type = signal.get('direction') or signal.get('signal')
             if signal_type in ['BUY', 'LONG']:
                 entry_price = signal.get('entry', current_price)
@@ -177,7 +188,7 @@ def run_backtest(
                 original_stop = stop_price
                 highest_pnl = 0
                 
-                risk_amount = balance * (risk_percent / 100)
+                risk_amount = balance * (current_risk / 100)
                 stop_distance = abs(entry_price - stop_price)
                 if stop_distance == 0:
                     continue
@@ -206,7 +217,7 @@ def run_backtest(
                 original_stop = stop_price
                 highest_pnl = 0
                 
-                risk_amount = balance * (risk_percent / 100)
+                risk_amount = balance * (current_risk / 100)
                 stop_distance = abs(entry_price - stop_price)
                 if stop_distance == 0:
                     continue

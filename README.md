@@ -18,7 +18,7 @@
 - ✅ Bybit V5 API (testnet)
 - ✅ Redis persistence (позиции, сделки, статистика, signal state)
 - ✅ Telegram уведомления + команды (/help)
-- ✅ Multi-pair: BNBUSDT, RENDERUSDT, XRPUSDT
+- ✅ Multi-pair: BNBUSDT, RENDERUSDT, SOLUSDT, LINKUSDT
 - ✅ Walk-forward validated (ROBUST)
 - ✅ Автооптимизация v2 (walk-forward + guard rails + regime params)
 - ✅ Regime detector (bull/bear/sideways + adaptive params)
@@ -97,7 +97,7 @@ Start-Process "C:\Program Files\Redis\redis-server.exe" -WindowStyle Hidden
 python main.py
 ```
 
-## Результаты (Walk-Forward + 12-Month Backtest)
+## Результаты (Walk-Forward + 4-Year Backtest)
 
 ### Walk-Forward Validation (OOS)
 
@@ -105,28 +105,28 @@ python main.py
 |------|--------|-----------|---------|---------|
 | BNBUSDT | **4.87** | +8.0% | ROBUST | ADX only |
 | RENDERUSDT | **2.76** | +13.1% | ROBUST | +session (8-21 UTC) |
-| XRPUSDT | **85.52** | +9.3% | ROBUST | +session +1D trend EMA50 |
 
-### 12-Month Backtest (max_leverage=20, compounding)
+### 4-Year Backtest (max_leverage=20, dynamic risk)
 
-| Pair | Period | Trades | WR | PF | Return | Max DD |
+| Pair | Period | Trades | WR | PF | Annual | Max DD |
 |------|--------|--------|-----|------|--------|--------|
-| BNBUSDT | 12 mo | 93 | 45% | 2.09 | +28.2% | 4.97% |
-| RENDERUSDT | 25 mo | 146 | 48% | 8.76 | +98.8% | 2.29% |
-| XRPUSDT | 6 mo | 16 | 62% | 57.81 | +9.3% | 0.12% |
+| BNBUSDT | 44 mo | 337 | 40% | 2.27 | +20.3% | 3.50% |
+| RENDERUSDT | 25 mo | 146 | 48% | 9.34 | +47.5% | 4.06% |
+| SOLUSDT | 44 mo | 453 | 40% | 2.22 | +19.1% | 5.46% |
+| LINKUSDT | 44 mo | 425 | 42% | 3.09 | +31.1% | 5.27% |
 
 ### Per-pair конфигурация
 
-| Параметр | BNB | RENDER | FIL |
-|----------|-----|--------|-----|
-| lookback | 12 | 12 | 12 |
-| sweep_threshold | 0.008 | 0.008 | 0.008 |
-| center_proximity | 0.012 | 0.012 | 0.012 |
-| tp_multiplier | 1.0 | 1.0 | 1.0 |
-| timeout | 15 | 15 | 15 |
-| adx_filter | ✅ 25 | ✅ 25 | ✅ 25 |
-| session_filter | — | ✅ 8-21 UTC | — |
-| trend_1d_filter | — | — | ✅ EMA50 |
+| Параметр | BNB | RENDER | SOL | LINK |
+|----------|-----|--------|-----|------|
+| lookback | 12 | 12 | 12 | 12 |
+| sweep_threshold | 0.008 | 0.008 | 0.008 | 0.008 |
+| center_proximity | 0.012 | 0.012 | 0.012 | 0.012 |
+| tp_multiplier | 1.0 | 1.0 | 1.0 | 1.0 |
+| timeout | 15 | 15 | 15 | 15 |
+| adx_filter | ✅ 25 | ✅ 25 | ✅ 25 | ✅ 25 |
+| session_filter | — | ✅ 8-21 UTC | — | — |
+| trend_1d_filter | — | — | — | — |
 
 ## Stress Test Results
 

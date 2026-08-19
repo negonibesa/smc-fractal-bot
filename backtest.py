@@ -50,7 +50,7 @@ def run_backtest(
     for s in signals:
         if 'timestamp' in s:
             signals_dict[s['timestamp']] = s
-        elif 'index' in s:
+        if 'index' in s:
             signals_dict[s['index']] = s
     
     for i in range(len(df)):

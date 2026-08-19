@@ -25,9 +25,12 @@ class TelegramNotifier:
         self.bot_token = bot_token or os.getenv("TELEGRAM_BOT_TOKEN", "")
         self.chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID", "")
         self.enabled = enabled and self.bot_token and self.chat_id
+        self.proxy = os.getenv("TELEGRAM_PROXY", "")
+        self.proxies = {"https": self.proxy, "http": self.proxy} if self.proxy else None
         
         if self.enabled:
-            logger.info(f"Telegram notifications ON (chat={self.chat_id[:8]}...)")
+            proxy_info = f" (proxy={self.proxy[:30]}...)" if self.proxy else ""
+            logger.info(f"Telegram notifications ON (chat={self.chat_id[:8]}...{proxy_info})")
         else:
             logger.info("Telegram notifications OFF")
     
@@ -43,7 +46,7 @@ class TelegramNotifier:
                 "text": text,
                 "parse_mode": parse_mode,
                 "disable_web_page_preview": True,
-            }, timeout=10)
+            }, timeout=10, proxies=self.proxies)
             
             if resp.status_code == 200:
                 return True

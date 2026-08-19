@@ -23,6 +23,7 @@ from core.redis_store import RedisStore
 from core.auto_optimizer import AutoOptimizer
 from core.regime_detector import detect_regime, adapt_params_for_regime
 from core.reporter import Reporter
+from core.dashboard import Dashboard
 from smc_features import find_consolidation_center, detect_sweep, calculate_adx
 
 load_dotenv()
@@ -275,11 +276,15 @@ class TrailingManager:
                 new_stop = min(new_stop, trail_stop)
         
         if new_stop != old_stop:
-            pos.stop_price = new_stop
-            # Отправляем ордер на обновление стопа
+            # Update exchange FIRST, only update tracker on success
             result = self.executor.update_stop_loss(symbol, new_stop)
-            logger.info(f"TRAIL {symbol}: SL {old_stop:.2f} → {new_stop:.2f} "
-                       f"(pnl_risk={pos.highest_pnl_risk:.2f})")
+            if result.success:
+                pos.stop_price = new_stop
+                self.tracker._save_position(symbol, pos)
+                logger.info(f"TRAIL {symbol}: SL {old_stop:.2f} → {new_stop:.2f} "
+                           f"(pnl_risk={pos.highest_pnl_risk:.2f})")
+            else:
+                logger.warning(f"TRAIL FAILED {symbol}: exchange rejected SL {new_stop:.2f}")
 
 
 # ─── MAIN BOT ──────────────────────────────────────────────────────
@@ -317,16 +322,17 @@ class SMCFractalBot:
             enabled=tg_config.get('enabled', False),
         )
         
-        # Bybit client (testnet)
+        # Bybit client (demo/testnet/mainnet)
         api_key = os.getenv("BYBIT_API_KEY", "")
         api_secret = os.getenv("BYBIT_API_SECRET", "")
-        testnet = os.getenv("BYBIT_TESTNET", "true").lower() == "true"
+        testnet = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
+        demo = os.getenv("BYBIT_DEMO", "true").lower() == "true"
         
         if not api_key or not api_secret:
             logger.error("BYBIT_API_KEY / BYBIT_API_SECRET not set in .env")
             sys.exit(1)
         
-        self.client = BybitClient(api_key, api_secret, testnet=testnet)
+        self.client = BybitClient(api_key, api_secret, testnet=testnet, demo=demo)
         self.risk = RiskManager(
             risk_percent=config['risk']['risk_percent'],
             max_drawdown=10.0,
@@ -360,10 +366,24 @@ class SMCFractalBot:
         # Auto-optimizer
         self.optimizer = AutoOptimizer(config, redis_store=self.redis)
         self.start_time = datetime.utcnow()
+        self.start_equity = 0.0  # set on first run loop
+        # Restore start_equity from Redis
+        try:
+            meta = self.redis.load_meta() if self.redis else None
+            logger.info(f"LOAD META: {meta}")
+            if meta and 'start_equity' in meta and meta['start_equity'] > 0:
+                self.start_equity = meta['start_equity']
+                logger.info(f"RESTORE start_equity: ${self.start_equity:,.2f}")
+        except Exception as e:
+            logger.warning(f"Failed to restore start_equity: {e}")
         self.last_optimize_check = {}
+        self.last_trade_close = {}  # symbol → timestamp of last trade close (cooldown)
         
         # Reporter (daily/weekly reports)
         self.reporter = Reporter(redis_store=self.redis, notifier=self.notifier)
+        
+        # Dashboard
+        self.dashboard = Dashboard(self, port=80)
         
         # Regime state per symbol
         self.regime_state = {}
@@ -371,6 +391,7 @@ class SMCFractalBot:
         # Symbols — each with its own config
         self.symbols = []
         self.symbol_configs = {}
+        self.locked_configs = set()  # symbols with lock_config=true — optimizer won't touch
         for asset in config.get('assets', []):
             if asset.get('enabled', False):
                 sym = asset['symbol']
@@ -383,6 +404,9 @@ class SMCFractalBot:
                         'trailing': config.get('trailing', {}),
                         'filters': config.get('filters', {}),
                     }
+                if asset.get('lock_config', False):
+                    self.locked_configs.add(sym)
+                    logger.info(f"  {sym}: config LOCKED (optimizer disabled)")
         
         # Per-symbol signal generators (must be after self.symbols is defined)
         self.signal_gens = {}
@@ -533,12 +557,20 @@ class SMCFractalBot:
             adapted = self.optimizer.get_regime_params(symbol, regime['regime'], current_params)
             if adapted != current_params:
                 self.symbol_configs[symbol]['strategy'].update(adapted)
-                # Rebuild signal generator with adapted params
+                # Rebuild signal generator with adapted params, preserving state
+                old_gen = self.signal_gens.get(symbol)
                 sym_config = {
                     'strategy': self._get_symbol_strategy(symbol),
                     'filters': self._get_symbol_filters(symbol),
                 }
-                self.signal_gens[symbol] = SignalGenerator(sym_config)
+                new_gen = SignalGenerator(sym_config)
+                if old_gen:
+                    new_gen.state = old_gen.state
+                    new_gen.sweep_direction = old_gen.sweep_direction
+                    new_gen.sweep_price = old_gen.sweep_price
+                    new_gen.sweep_index = old_gen.sweep_index
+                    new_gen.center_at_sweep = old_gen.center_at_sweep
+                self.signal_gens[symbol] = new_gen
                 logger.info(f"REGIME ADAPT {symbol}: {regime['regime']} → params updated")
             elif regime['regime'] != 'sideways':
                 logger.info(f"REGIME {symbol}: {regime['regime']} "
@@ -557,6 +589,7 @@ class SMCFractalBot:
                 logger.info(f"EXIT: {symbol} {exit_result['exit_reason']} PnL={exit_result['pnl']:.2f}")
                 self.risk.register_trade(exit_result['pnl'])
                 self.executor.close_position(symbol)
+                self.last_trade_close[symbol] = time.time()
                 self.notifier.send_exit(
                     symbol, exit_result['side'], exit_result['entry_price'],
                     exit_result['exit_price'], exit_result['pnl'], exit_result['exit_reason']
@@ -570,6 +603,12 @@ class SMCFractalBot:
         
         # 5. Если нет позиции — ищем сигнал
         if not self.tracker.has_position(symbol):
+            # Cooldown: skip if trade closed recently (wait for new 4H candle)
+            last_close = self.last_trade_close.get(symbol, 0)
+            candle_interval = 4 * 3600  # 4H = 14400 seconds
+            if time.time() - last_close < candle_interval:
+                return  # Skip — wait for new candle
+            
             # Используем предпоследнюю свечу (текущая ещё не закрыта)
             candle_idx = len(df) - 2
             sig = sig_gen.process_candle(df, candle_idx)
@@ -589,34 +628,34 @@ class SMCFractalBot:
                 else:
                     result = self.executor.open_short(symbol, entry, stop, tp)
                 
-                if result.success:
-                    # Зарегистрировать в tracker
-                    balance = self.client.get_wallet_balance()
-                    equity = float(balance.get('totalEquity', 0))
-                    inst = self.executor._get_instrument(symbol)
-                    size = self.risk.calculate_position_size(
-                        entry, stop, equity,
-                        risk_percent=self.risk.get_current_risk(),
-                        qty_step=inst['qty_step']
-                    )
+                if result.success and result.sl_tp_ok:
+                    # Use actual filled quantity from exchange
+                    size = result.filled_qty
                     
                     if size > 0:
-                        self.tracker.open_position(symbol, direction, entry, size, stop, tp)
-                        logger.info(f"OPENED: {direction} {size} {symbol} @ {entry:.2f}")
+                        tracker_side = "LONG" if direction == "BUY" else "SHORT"
+                        self.tracker.open_position(symbol, tracker_side, entry, size, stop, tp)
+                        logger.info(f"OPENED: {tracker_side} {size} {symbol} @ {entry:.2f}")
                         self.notifier.send_entry(symbol, direction, entry, stop, tp, size)
+                elif result.success and not result.sl_tp_ok:
+                    logger.error(f"Position opened but SL/TP failed — emergency closed {symbol}")
+                    self.notifier.send_error("SL/TP failed, position auto-closed", f"Entry {symbol}")
                 else:
                     logger.error(f"Order failed: {result.message}")
                     self.notifier.send_error(result.message, f"Entry {symbol}")
     
     def _start_telegram_listener(self):
         """Start background thread for Telegram command polling."""
+        proxy = os.getenv("TELEGRAM_PROXY", "")
+        proxies = {"https": proxy, "http": proxy} if proxy else None
+        
         def _poll_loop():
             import requests as req
             offset = 0
             while self.running:
                 try:
                     url = f"https://api.telegram.org/bot{self.notifier.bot_token}/getUpdates"
-                    resp = req.get(url, params={'offset': offset, 'timeout': 10}, timeout=15)
+                    resp = req.get(url, params={'offset': offset, 'timeout': 10}, timeout=15, proxies=proxies)
                     if resp.status_code != 200:
                         time.sleep(5)
                         continue
@@ -697,16 +736,21 @@ class SMCFractalBot:
         logger.info("="*60)
         logger.info("SMC FRACTAL BOT — STARTING")
         logger.info(f"Symbols: {self.symbols}")
-        logger.info(f"Testnet: {os.getenv('BYBIT_TESTNET', 'true')}")
+        # Telegram start
+        testnet = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
+        demo = os.getenv("BYBIT_DEMO", "true").lower() == "true"
+        mode = 'testnet' if testnet else 'demo' if demo else 'mainnet'
+        logger.info(f"Mode: {mode}")
         for sym in self.symbols:
             strat = self._get_symbol_strategy(sym)
             logger.info(f"  {sym}: lb={strat.get('lookback')} sw={strat.get('sweep_threshold')} "
                        f"prox={strat.get('center_proximity')} tp={strat.get('tp_multiplier')}")
         logger.info("="*60)
         
-        # Telegram start
-        testnet = os.getenv("BYBIT_TESTNET", "true").lower() == "true"
         self.notifier.send_start(self.symbols, testnet)
+        
+        # Start dashboard
+        self.dashboard.run_in_thread()
         
         # Daily report tracker
         last_report_day = datetime.utcnow().date()
@@ -738,6 +782,25 @@ class SMCFractalBot:
             now = datetime.utcnow()
             balance = self.client.get_wallet_balance()
             equity = float(balance.get('totalEquity', 0)) if balance else 0
+            
+            # Set start_equity on first loop iteration — ONLY once, never overwrite
+            if self.start_equity == 0 and equity > 0:
+                if self.redis:
+                    try:
+                        existing = self.redis.load_meta()
+                        if existing and 'start_equity' in existing and existing['start_equity'] > 0:
+                            self.start_equity = existing['start_equity']
+                        else:
+                            self.start_equity = equity
+                            self.redis.save_meta({'start_equity': equity, 'start_time': self.start_time.isoformat()})
+                    except Exception:
+                        self.start_equity = equity
+                else:
+                    self.start_equity = equity
+                logger.info(f"START EQUITY: ${self.start_equity:,.2f}")
+            
+            # Update risk manager with current equity
+            self.risk.update_equity(equity)
 
             if now.date() > last_report_day and now.hour == 0 and now.minute < 10:
                 self.reporter.send_daily(equity, self.tracker.positions, self.regime_state)
@@ -761,8 +824,17 @@ class SMCFractalBot:
                     risk_status = self.risk.get_status()
                     trades = risk_status.get('total_trades', 0)
                     pf = risk_status.get('profit_factor', 2.0)
-                    daily_dd = abs(risk_status.get('daily_pnl', 0)) / max(risk_status.get('equity', 1), 1)
-                    
+                    daily_pnl = risk_status.get('daily_pnl', 0)
+                    current_equity = risk_status.get('equity', 0)
+                    if daily_pnl < 0 and current_equity > 0:
+                        daily_dd = abs(daily_pnl) / current_equity
+                    else:
+                        daily_dd = 0
+
+                    if symbol in self.locked_configs:
+                        self.last_optimize_check[symbol] = now
+                        continue
+
                     if self.optimizer.should_optimize(symbol, trades, days_running, pf, daily_dd):
                         df = self.fetch_candles(symbol, interval="240", limit=500)
                         if len(df) > 100:

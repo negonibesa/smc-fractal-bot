@@ -16,6 +16,8 @@ services:
     container_name: smc-bot
     depends_on:
       - redis
+    ports:
+      - "80:80"
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379

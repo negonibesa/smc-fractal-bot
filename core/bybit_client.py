@@ -7,6 +7,7 @@ import hmac
 import hashlib
 import json
 import requests
+import threading
 from typing import Optional, Dict, Any
 from urllib.parse import urlencode
 
@@ -16,10 +17,12 @@ class BybitClient:
     
     BASE_URL = "https://api.bybit.com"
     
-    def __init__(self, api_key: str, api_secret: str, testnet: bool = False):
+    def __init__(self, api_key: str, api_secret: str, testnet: bool = False, demo: bool = False):
         self.api_key = api_key
         self.api_secret = api_secret
         self.testnet = testnet
+        self.demo = demo
+        self._lock = threading.Lock()
         self.session = requests.Session()
         self.session.headers.update({
             "Content-Type": "application/json",
@@ -28,6 +31,8 @@ class BybitClient:
         
         if testnet:
             self.BASE_URL = "https://api-testnet.bybit.com"
+        elif demo:
+            self.BASE_URL = "https://api-demo.bybit.com"
         
         self._time_offset = self._sync_time()
     
@@ -59,33 +64,34 @@ class BybitClient:
     
     def _request(self, method: str, endpoint: str, params: Optional[Dict] = None,
                  signed: bool = False) -> Dict:
-        """Make API request."""
-        url = f"{self.BASE_URL}{endpoint}"
-        
-        if signed:
-            timestamp = int(time.time() * 1000) + self._time_offset
-            params = params or {}
-            params["timestamp"] = timestamp
-            use_json = (method == "POST")
-            signature = self._sign(params, timestamp, use_json=use_json)
-            self.session.headers.update({
-                "X-BAPI-API-KEY": self.api_key,
-                "X-BAPI-TIMESTAMP": str(timestamp),
-                "X-BAPI-SIGN": signature,
-                "X-BAPI-RECV-WINDOW": "50000",
-            })
-        
-        if method == "GET":
-            resp = self.session.get(url, params=params, timeout=30)
-        else:
-            resp = self.session.post(url, json=params, timeout=30)
-        
-        data = resp.json()
-        
-        if data.get("retCode") != 0:
-            raise Exception(f"Bybit API error: {data.get('retMsg', 'Unknown')} (code={data.get('retCode')})")
-        
-        return data.get("result", {})
+        """Make API request (thread-safe)."""
+        with self._lock:
+            url = f"{self.BASE_URL}{endpoint}"
+            
+            if signed:
+                timestamp = int(time.time() * 1000) + self._time_offset
+                params = params or {}
+                params["timestamp"] = timestamp
+                use_json = (method == "POST")
+                signature = self._sign(params, timestamp, use_json=use_json)
+                self.session.headers.update({
+                    "X-BAPI-API-KEY": self.api_key,
+                    "X-BAPI-TIMESTAMP": str(timestamp),
+                    "X-BAPI-SIGN": signature,
+                    "X-BAPI-RECV-WINDOW": "50000",
+                })
+            
+            if method == "GET":
+                resp = self.session.get(url, params=params, timeout=30)
+            else:
+                resp = self.session.post(url, json=params, timeout=30)
+            
+            data = resp.json()
+            
+            if data.get("retCode") != 0:
+                raise Exception(f"Bybit API error: {data.get('retMsg', 'Unknown')} (code={data.get('retCode')})")
+            
+            return data.get("result", {})
     
     # ─── MARKET DATA ─────────────────────────────────────────────
     
@@ -141,7 +147,8 @@ class BybitClient:
     def get_positions(self) -> list:
         """Get all positions."""
         result = self._request("GET", "/v5/position/list", {
-            "category": "linear"
+            "category": "linear",
+            "settleCoin": "USDT"
         }, signed=True)
         return [p for p in result.get('list', []) if float(p.get('size', 0)) > 0]
     

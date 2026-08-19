@@ -82,9 +82,15 @@ class PositionTracker:
             # Positions
             saved = self.redis.load_all_positions()
             for sym, p in saved.items():
+                side = p['side']
+                # Convert old format
+                if side == 'BUY':
+                    side = 'LONG'
+                elif side == 'SELL':
+                    side = 'SHORT'
                 pos = Position(
                     symbol=p['symbol'],
-                    side=p['side'],
+                    side=side,
                     entry_price=p['entry_price'],
                     size=p['size'],
                     stop_price=p['stop_price'],
@@ -199,7 +205,7 @@ class PositionTracker:
                 be_stop = pos.entry_price + pos.entry_price * 0.0005  # commission
                 new_stop = max(new_stop, be_stop)
             else:
-                be_stop = pos.entry_price - pos.entry_price * 0.0005
+                be_stop = pos.entry_price + pos.entry_price * 0.0005
                 new_stop = min(new_stop, be_stop)
         
         # Trailing

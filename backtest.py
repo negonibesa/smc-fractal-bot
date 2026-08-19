@@ -18,7 +18,8 @@ def run_backtest(
     stop_buffer: float = 0.002,
     breakeven_at: float = 0.5,    # Move to breakeven after 0.5x risk in profit
     trailing_activate: float = 1.0, # Activate trailing after 1.0x risk in profit
-    trailing_step: float = 0.5      # Trail by 0.5x risk
+    trailing_step: float = 0.5,     # Trail by 0.5x risk
+    max_leverage: float = 20.0,     # Max leverage cap
 ) -> Tuple[List[dict], dict]:
     """
     Бэктест с trailing stop и breakeven:
@@ -182,6 +183,11 @@ def run_backtest(
                     continue
                 position = risk_amount / stop_distance
                 
+                notional = position * entry_price
+                max_notional = balance * max_leverage
+                if notional > max_notional:
+                    position = max_notional / entry_price
+                
                 balance -= position * entry_price * (1 + commission)
                 direction = 'LONG'
                 entry_time = current_time
@@ -205,6 +211,11 @@ def run_backtest(
                 if stop_distance == 0:
                     continue
                 position = risk_amount / stop_distance
+                
+                notional = position * entry_price
+                max_notional = balance * max_leverage
+                if notional > max_notional:
+                    position = max_notional / entry_price
                 
                 balance -= position * entry_price * (1 + commission)
                 direction = 'SHORT'

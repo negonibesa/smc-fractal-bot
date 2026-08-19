@@ -109,7 +109,8 @@ def run_bt(df, params, trailing, filters_flags=None, df_1d=None):
     _, metrics = run_backtest(bt_df, bs, initial_balance=10000, risk_percent=1.0,
         breakeven_at=trailing.get('breakeven_at',0.5),
         trailing_activate=trailing.get('trail_activate',1.0),
-        trailing_step=trailing.get('trail_step',0.5))
+        trailing_step=trailing.get('trail_step',0.5),
+        max_leverage=20)
     return metrics, signals
 
 # ─── RUN ALL PAIRS ──────────────────────────────────────────────

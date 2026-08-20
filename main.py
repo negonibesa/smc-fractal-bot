@@ -84,7 +84,8 @@ def load_config() -> dict:
 class SignalGenerator:
     """Генерация сигналов из live данных."""
     
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, symbol: str = ''):
+        self.symbol = symbol
         self.lookback = config['strategy']['lookback']
         self.sweep_threshold = config['strategy']['sweep_threshold']
         self.center_proximity = config['strategy']['center_proximity']
@@ -227,7 +228,7 @@ class SignalGenerator:
                 current_time = df['timestamp'].iloc[candle_index]
                 elapsed_hours = (current_time - self.sweep_time).total_seconds() / 3600
                 if elapsed_hours > self.timeout * 4:  # timeout is in candles, 4H each
-                    logger.info(f"TIMEOUT {symbol}: {elapsed_hours:.1f}h elapsed > {self.timeout * 4}h limit")
+                    logger.info(f"TIMEOUT {self.symbol}: {elapsed_hours:.1f}h elapsed > {self.timeout * 4}h limit")
                     self.state = 0
                     self.sweep_direction = None
                     self.sweep_time = None
@@ -378,10 +379,6 @@ class SMCFractalBot:
         )
         self.executor = OrderExecutor(self.client, self.risk)
         self.tracker = PositionTracker(
-            trailing_enabled=config.get('trailing', {}).get('enabled', True),
-            breakeven_at=config.get('trailing', {}).get('breakeven_at', 0.5),
-            trail_activate=config.get('trailing', {}).get('trail_activate', 1.0),
-            trail_step=config.get('trailing', {}).get('trail_step', 0.5),
             redis_store=self.redis,
         )
         self.signal_gen = SignalGenerator(config)
@@ -470,7 +467,7 @@ class SMCFractalBot:
                 'strategy': self._get_symbol_strategy(sym),
                 'filters': self._get_symbol_filters(sym),
             }
-            self.signal_gens[sym] = SignalGenerator(sym_config)
+            self.signal_gens[sym] = SignalGenerator(sym_config, symbol=sym)
         
         # Restore signal states from Redis
         if self.redis:
@@ -698,7 +695,7 @@ class SMCFractalBot:
                     'strategy': self._get_symbol_strategy(symbol),
                     'filters': self._get_symbol_filters(symbol),
                 }
-                new_gen = SignalGenerator(sym_config)
+                new_gen = SignalGenerator(sym_config, symbol=symbol)
                 if old_gen:
                     new_gen.state = old_gen.state
                     new_gen.sweep_direction = old_gen.sweep_direction
@@ -728,8 +725,7 @@ class SMCFractalBot:
                 if not close_result.success:
                     logger.error(f"CLOSE FAILED {symbol}: {close_result.message} — position may still be open!")
                     # Retry once
-                    import time as _time
-                    _time.sleep(1)
+                    time.sleep(1)
                     close_result = self.executor.close_position(symbol)
                     if not close_result.success:
                         logger.critical(f"CLOSE RETRY FAILED {symbol}: {close_result.message} — NAKED RISK")
@@ -1017,7 +1013,7 @@ class SMCFractalBot:
                                     'strategy': self._get_symbol_strategy(symbol),
                                     'filters': self._get_symbol_filters(symbol),
                                 }
-                                new_gen = SignalGenerator(sym_config)
+                                new_gen = SignalGenerator(sym_config, symbol=symbol)
                                 if old_gen:
                                     new_gen.state = old_gen.state
                                     new_gen.sweep_direction = old_gen.sweep_direction

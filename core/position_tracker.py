@@ -49,23 +49,11 @@ class Position:
 class PositionTracker:
     """Отслеживание позиций и управление trailing stop."""
     
-    def __init__(self, trailing_enabled: bool = True,
-                 breakeven_at: float = 0.5,
-                 trail_activate: float = 1.0,
-                 trail_step: float = 0.5,
-                 redis_store=None):
+    def __init__(self, redis_store=None):
         """
         Args:
-            trailing_enabled: Включить trailing stop
-            breakeven_at: После Xx риска → move to breakeven
-            trail_activate: После Xx риска → начать трейлить
-            trail_step: Трейлить на Xx риска от цены
             redis_store: RedisStore instance for persistence
         """
-        self.trailing_enabled = trailing_enabled
-        self.breakeven_at = breakeven_at
-        self.trail_activate = trail_activate
-        self.trail_step = trail_step
         self.redis = redis_store
         
         self.positions: Dict[str, Position] = {}  # symbol → Position
@@ -168,67 +156,6 @@ class PositionTracker:
         self._save_position(symbol, pos)
         logger.info(f"TRACK OPEN: {side} {size} {symbol} @ {entry} SL={stop} TP={tp}")
         return pos
-    
-    def update_trailing(self, symbol: str, current_price: float,
-                        high: float = None, low: float = None) -> Optional[float]:
-        """
-        Обновить trailing stop для позиции.
-        
-        Returns:
-            Новый stop price если изменился, иначе None
-        """
-        pos = self.positions.get(symbol)
-        if not pos or not self.trailing_enabled:
-            return None
-        
-        # Используем high/low для точного расчёта
-        price = current_price
-        if pos.side == "LONG" and high is not None:
-            price = high
-        elif pos.side == "SHORT" and low is not None:
-            price = low
-        
-        risk_unit = pos.risk_unit
-        if risk_unit == 0:
-            return None
-        
-        # PnL в единицах риска
-        pnl_risk = pos.pnl_in_risk(price)
-        pos.highest_pnl_risk = max(pos.highest_pnl_risk, pnl_risk)
-        
-        old_stop = pos.stop_price
-        new_stop = old_stop
-        
-        # Breakeven
-        if self.breakeven_at > 0 and pos.highest_pnl_risk >= self.breakeven_at:
-            if pos.side == "LONG":
-                be_stop = pos.entry_price + pos.entry_price * 0.0005  # commission
-                new_stop = max(new_stop, be_stop)
-            else:
-                be_stop = pos.entry_price - pos.entry_price * 0.0005  # SHORT: move stop DOWN
-                new_stop = min(new_stop, be_stop)
-        
-        # Trailing
-        if self.trail_activate > 0 and self.trail_step > 0:
-            if pos.highest_pnl_risk >= self.trail_activate:
-                pos.trailing_active = True
-                trail_dist = risk_unit * self.trail_step
-                
-                if pos.side == "LONG":
-                    trail_stop = current_price - trail_dist
-                    new_stop = max(new_stop, trail_stop)
-                else:
-                    trail_stop = current_price + trail_dist
-                    new_stop = min(new_stop, trail_stop)
-        
-        if new_stop != old_stop:
-            pos.stop_price = new_stop
-            self._save_position(symbol, pos)
-            logger.info(f"TRAIL {symbol}: SL {old_stop:.2f} → {new_stop:.2f} "
-                       f"(pnl_risk={pos.highest_pnl_risk:.2f})")
-            return new_stop
-        
-        return None
     
     def check_exits(self, symbol: str, high: float, low: float,
                     close: float) -> Optional[Dict]:

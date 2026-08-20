@@ -16,27 +16,38 @@ def run_backtest(
     commission: float = 0.001,
     slippage: float = 0.0005,
     stop_buffer: float = 0.002,
-    breakeven_at: float = 0.5,    # Move to breakeven after 0.5x risk in profit
-    trailing_activate: float = 1.0, # Activate trailing after 1.0x risk in profit
-    trailing_step: float = 0.5,     # Trail by 0.5x risk
-    max_leverage: float = 20.0,     # Max leverage cap
-    dynamic_risk: dict = None,      # {base_risk, min_risk, max_risk, dd_t1, dd_t2, pf_hot, pf_window}
+    breakeven_at: float = 0.5,
+    trailing_activate: float = 1.0,
+    trailing_step: float = 0.5,
+    max_leverage: float = 20.0,
+    dynamic_risk: dict = None,
 ) -> Tuple[List[dict], dict]:
     """
-    Бэктест с trailing stop, breakeven и dynamic risk (DD + PF).
+    Backtest with trailing stop, breakeven, dynamic risk (DD + PF).
+
+    Balance model (cash-flow, correctly for LONG and SHORT):
+      LONG  entry:  balance -= margin + commission
+      LONG  exit:   balance += margin + pnl - commission
+      SHORT entry:  balance -= margin + commission  (margin locked as collateral)
+      SHORT exit:   balance += margin + pnl - commission
+
+    equity = balance when flat; during a position equity includes unrealized PnL.
+    Dynamic risk and DD are computed on equity, not raw balance.
     """
     trades = []
     balance = initial_balance
-    peak_balance = initial_balance
+    equity = initial_balance
+    peak_equity = initial_balance
     position = 0
-    entry_price = 0
-    stop_price = 0
-    tp_price = 0
+    entry_price = 0.0
+    stop_price = 0.0
+    tp_price = 0.0
     entry_time = None
     direction = None
-    original_stop = 0
-    highest_pnl = 0  # track max profit in risk units
-    
+    original_stop = 0.0
+    highest_pnl = 0.0
+    margin_used = 0.0  # margin locked at entry
+
     # Dynamic risk params
     dr_base = dynamic_risk.get('base_risk', 1.5) if dynamic_risk else risk_percent
     dr_min = dynamic_risk.get('min_risk', 0.75) if dynamic_risk else risk_percent
@@ -45,48 +56,86 @@ def run_backtest(
     dr_dd2 = dynamic_risk.get('dd_threshold_2', 10.0) if dynamic_risk else 999
     dr_pf_hot = dynamic_risk.get('pf_hot', 2.0) if dynamic_risk else 999
     dr_pf_window = dynamic_risk.get('pf_window', 20) if dynamic_risk else 20
-    
+
     signals_dict = {}
     for s in signals:
         if 'timestamp' in s:
             signals_dict[s['timestamp']] = s
         if 'index' in s:
             signals_dict[s['index']] = s
-    
+
+    def _calc_equity(pos, ep, sp, dir_, current_p):
+        """Compute equity given current state."""
+        if pos == 0:
+            return balance
+        risk_u = abs(ep - sp)
+        if risk_u == 0:
+            return balance
+        if dir_ == 'LONG':
+            unrealized = pos * (current_p - ep)
+        else:
+            unrealized = pos * (ep - current_p)
+        return margin_used + unrealized
+
+    def _close_position(exit_p, reason, current_time):
+        nonlocal position, entry_price, stop_price, tp_price, direction
+        nonlocal original_stop, highest_pnl, balance, equity, margin_used, peak_equity
+
+        if direction == 'LONG':
+            raw_pnl = position * (exit_p - entry_price)
+        else:
+            raw_pnl = position * (entry_price - exit_p)
+
+        pnl = raw_pnl - abs(position) * entry_price * commission - abs(position) * exit_p * commission
+
+        balance += margin_used + raw_pnl - abs(position) * exit_p * commission
+
+        trades.append({
+            'entry_time': entry_time, 'exit_time': current_time,
+            'entry_price': entry_price, 'exit_price': exit_p,
+            'pnl': pnl, 'direction': direction, 'exit_reason': reason,
+            'risk_units': highest_pnl, 'stop_price': original_stop,
+        })
+
+        position = 0
+        direction = None
+        margin_used = 0.0
+        equity = balance
+        peak_equity = max(peak_equity, balance)
+
     for i in range(len(df)):
         current_time = df.index[i] if df.index is not None else i
         current_price = df['close'].iloc[i]
         high = df['high'].iloc[i]
         low = df['low'].iloc[i]
-        
+
         signal = signals_dict.get(current_time) if current_time in signals_dict else None
         if signal is None:
             signal = signals_dict.get(i) if i in signals_dict else None
-        
-        # ─── Управление позицией ─────────────────────────────────────
+
+        # ─── Position management ──────────────────────────────────
         if position != 0:
             risk_unit = abs(entry_price - original_stop)
-            
-            # Calculate current PnL in risk units
+
             if direction == 'LONG':
                 current_pnl_risk = (high - entry_price) / risk_unit if risk_unit > 0 else 0
             else:
                 current_pnl_risk = (entry_price - low) / risk_unit if risk_unit > 0 else 0
-            
+
             highest_pnl = max(highest_pnl, current_pnl_risk)
-            
-            # Breakeven: move stop to entry after X risk in profit
+
+            # Breakeven
             if breakeven_at > 0 and highest_pnl >= breakeven_at:
                 if direction == 'LONG':
-                    new_stop = entry_price + entry_price * commission  # entry + commission
+                    new_stop = entry_price + entry_price * commission
                     if new_stop > stop_price:
                         stop_price = new_stop
                 else:
                     new_stop = entry_price - entry_price * commission
                     if new_stop < stop_price:
                         stop_price = new_stop
-            
-            # Trailing stop: after activation, trail behind price
+
+            # Trailing stop
             if trailing_activate > 0 and trailing_step > 0 and highest_pnl >= trailing_activate:
                 trail_distance = risk_unit * trailing_step
                 if direction == 'LONG':
@@ -97,98 +146,53 @@ def run_backtest(
                     new_stop = low + trail_distance
                     if new_stop < stop_price:
                         stop_price = new_stop
-            
-            # Check stop loss (including trailing)
+
+            # Check stop loss
             if direction == 'LONG' and low <= stop_price:
                 exit_price = stop_price * (1 - slippage)
-                pnl = position * (exit_price - entry_price) - abs(position) * exit_price * commission
-                balance += abs(position) * exit_price * (1 - commission)
-                
                 exit_reason = 'STOP_LOSS'
                 if stop_price > original_stop and abs(stop_price - entry_price) < abs(original_stop - entry_price):
-                    if abs(stop_price - entry_price) < risk_unit * 0.1:
-                        exit_reason = 'BREAKEVEN'
-                    else:
-                        exit_reason = 'TRAILING_STOP'
-                
-                trades.append({
-                    'entry_time': entry_time, 'exit_time': current_time,
-                    'entry_price': entry_price, 'exit_price': exit_price,
-                    'pnl': pnl, 'direction': direction, 'exit_reason': exit_reason,
-                    'risk_units': highest_pnl
-                })
-                position = 0
-                direction = None
-                
+                    exit_reason = 'BREAKEVEN' if abs(stop_price - entry_price) < risk_unit * 0.1 else 'TRAILING_STOP'
+                _close_position(exit_price, exit_reason, current_time)
+
             elif direction == 'SHORT' and high >= stop_price:
                 exit_price = stop_price * (1 + slippage)
-                pnl = position * (entry_price - exit_price) - abs(position) * exit_price * commission
-                balance += abs(position) * exit_price * (1 - commission)
-                
                 exit_reason = 'STOP_LOSS'
                 if stop_price < original_stop and abs(stop_price - entry_price) < abs(original_stop - entry_price):
-                    if abs(entry_price - stop_price) < risk_unit * 0.1:
-                        exit_reason = 'BREAKEVEN'
-                    else:
-                        exit_reason = 'TRAILING_STOP'
-                
-                trades.append({
-                    'entry_time': entry_time, 'exit_time': current_time,
-                    'entry_price': entry_price, 'exit_price': exit_price,
-                    'pnl': pnl, 'direction': direction, 'exit_reason': exit_reason,
-                    'risk_units': highest_pnl
-                })
-                position = 0
-                direction = None
-            
+                    exit_reason = 'BREAKEVEN' if abs(entry_price - stop_price) < risk_unit * 0.1 else 'TRAILING_STOP'
+                _close_position(exit_price, exit_reason, current_time)
+
             # Check take profit
             elif direction == 'LONG' and high >= tp_price:
                 exit_price = tp_price * (1 - slippage)
-                pnl = position * (exit_price - entry_price) - abs(position) * exit_price * commission
-                balance += abs(position) * exit_price * (1 - commission)
-                trades.append({
-                    'entry_time': entry_time, 'exit_time': current_time,
-                    'entry_price': entry_price, 'exit_price': exit_price,
-                    'pnl': pnl, 'direction': direction, 'exit_reason': 'TAKE_PROFIT',
-                    'risk_units': highest_pnl
-                })
-                position = 0
-                direction = None
-                
+                _close_position(exit_price, 'TAKE_PROFIT', current_time)
+
             elif direction == 'SHORT' and low <= tp_price:
                 exit_price = tp_price * (1 + slippage)
-                pnl = position * (entry_price - exit_price) - abs(position) * exit_price * commission
-                balance += abs(position) * exit_price * (1 - commission)
-                trades.append({
-                    'entry_time': entry_time, 'exit_time': current_time,
-                    'entry_price': entry_price, 'exit_price': exit_price,
-                    'pnl': pnl, 'direction': direction, 'exit_reason': 'TAKE_PROFIT',
-                    'risk_units': highest_pnl
-                })
-                position = 0
-                direction = None
-        
-        # ─── Entry ───────────────────────────────────────────────────
+                _close_position(exit_price, 'TAKE_PROFIT', current_time)
+
+            # Update equity while position is open
+            if position != 0:
+                equity = _calc_equity(position, entry_price, stop_price, direction, current_price)
+                peak_equity = max(peak_equity, equity)
+
+        # ─── Entry ────────────────────────────────────────────────
         if position == 0 and signal is not None:
-            # Dynamic risk: DD + PF based
             current_risk = risk_percent
             if dynamic_risk:
-                peak_balance = max(peak_balance, balance)
-                dd_pct = (peak_balance - balance) / peak_balance * 100 if peak_balance > 0 else 0
-                
+                dd_pct = (peak_equity - equity) / peak_equity * 100 if peak_equity > 0 else 0
+
                 current_risk = dr_base
-                
-                # DD circuit breaker
+
                 if dd_pct > dr_dd2:
                     current_risk = dr_min
                 elif dd_pct > dr_dd1:
                     current_risk = 1.0
-                
-                # PF hot streak bonus
+
                 pf_20 = _calc_pf_last_n(trades, dr_pf_window)
                 if pf_20 > dr_pf_hot and dd_pct < 3.0:
                     current_risk = dr_max
-                
+
                 current_risk = max(dr_min, min(current_risk, dr_max))
 
             signal_type = signal.get('direction') or signal.get('signal')
@@ -196,90 +200,87 @@ def run_backtest(
                 entry_price = signal.get('entry', current_price)
                 stop_price = signal.get('stop')
                 tp_price = signal.get('tp')
-                
+
                 if stop_price is None or tp_price is None:
                     continue
-                
+
                 stop_buffer_abs = abs(entry_price - stop_price) * stop_buffer
                 stop_price = stop_price - stop_buffer_abs
-                
+
                 original_stop = stop_price
                 highest_pnl = 0
-                
-                risk_amount = balance * (current_risk / 100)
+
+                risk_amount = equity * (current_risk / 100)
                 stop_distance = abs(entry_price - stop_price)
                 if stop_distance == 0:
                     continue
                 position = risk_amount / stop_distance
-                
+
                 notional = position * entry_price
-                max_notional = balance * max_leverage
+                max_notional = equity * max_leverage
                 if notional > max_notional:
                     position = max_notional / entry_price
-                
-                balance -= position * entry_price * (1 + commission)
+
+                margin_used = position * entry_price / max_leverage
+                entry_commission = abs(position) * entry_price * commission
+                balance -= margin_used + entry_commission
                 direction = 'LONG'
                 entry_time = current_time
-                
+                equity = margin_used
+
             elif signal_type in ['SELL', 'SHORT']:
                 entry_price = signal.get('entry', current_price)
                 stop_price = signal.get('stop')
                 tp_price = signal.get('tp')
-                
+
                 if stop_price is None or tp_price is None:
                     continue
-                
+
                 stop_buffer_abs = abs(entry_price - stop_price) * stop_buffer
                 stop_price = stop_price + stop_buffer_abs
-                
+
                 original_stop = stop_price
                 highest_pnl = 0
-                
-                risk_amount = balance * (current_risk / 100)
+
+                risk_amount = equity * (current_risk / 100)
                 stop_distance = abs(entry_price - stop_price)
                 if stop_distance == 0:
                     continue
                 position = risk_amount / stop_distance
-                
+
                 notional = position * entry_price
-                max_notional = balance * max_leverage
+                max_notional = equity * max_leverage
                 if notional > max_notional:
                     position = max_notional / entry_price
-                
-                balance -= position * entry_price * (1 + commission)
+
+                margin_used = position * entry_price / max_leverage
+                entry_commission = abs(position) * entry_price * commission
+                balance -= margin_used + entry_commission
                 direction = 'SHORT'
                 entry_time = current_time
-        
-        # ─── Exit on opposite signal ─────────────────────────────────
+                equity = margin_used
+
+        # ─── Exit on opposite signal ─────────────────────────────
         elif position != 0 and signal is not None:
             signal_type = signal.get('direction') or signal.get('signal')
             if (direction == 'LONG' and signal_type in ['SELL', 'SHORT']) or \
                (direction == 'SHORT' and signal_type in ['BUY', 'LONG']):
-                exit_price = current_price * (1 - slippage) if direction == 'LONG' else current_price * (1 + slippage)
-                pnl = position * (exit_price - entry_price) - abs(position) * exit_price * commission
-                balance += abs(position) * exit_price * (1 - commission)
-                trades.append({
-                    'entry_time': entry_time, 'exit_time': current_time,
-                    'entry_price': entry_price, 'exit_price': exit_price,
-                    'pnl': pnl, 'direction': direction, 'exit_reason': 'SIGNAL',
-                    'risk_units': highest_pnl
-                })
-                position = 0
-                direction = None
-    
+                if direction == 'LONG':
+                    exit_price = current_price * (1 - slippage)
+                else:
+                    exit_price = current_price * (1 + slippage)
+                _close_position(exit_price, 'SIGNAL', current_time)
+
     # Close last position
     if position != 0:
         final_price = df['close'].iloc[-1]
-        exit_price = final_price * (1 - slippage) if direction == 'LONG' else final_price * (1 + slippage)
-        pnl = position * (exit_price - entry_price) - abs(position) * exit_price * commission
-        balance += abs(position) * exit_price * (1 - commission)
-        trades.append({
-            'entry_time': entry_time, 'exit_time': df.index[-1] if df.index is not None else len(df) - 1,
-            'entry_price': entry_price, 'exit_price': exit_price,
-            'pnl': pnl, 'direction': direction, 'exit_reason': 'FORCE_CLOSE',
-            'risk_units': highest_pnl
-        })
-    
+        if direction == 'LONG':
+            exit_price = final_price * (1 - slippage)
+        else:
+            exit_price = final_price * (1 + slippage)
+        _close_position(exit_price, 'FORCE_CLOSE',
+                        df.index[-1] if df.index is not None else len(df) - 1)
+
     metrics = calculate_backtest_metrics(trades, initial_balance)
     return trades, metrics
 
@@ -291,32 +292,32 @@ def calculate_backtest_metrics(trades: List[dict], initial_balance: float) -> di
             "max_drawdown": 0, "sharpe_ratio": 0,
             "final_balance": initial_balance, "total_return": 0
         }
-    
+
     wins = [t for t in trades if t["pnl"] > 0]
     losses = [t for t in trades if t["pnl"] <= 0]
     win_rate = len(wins) / len(trades) if trades else 0
     total_profit = sum(t["pnl"] for t in wins) if wins else 0
     total_loss = abs(sum(t["pnl"] for t in losses)) if losses else 0
     profit_factor = total_profit / total_loss if total_loss > 0 else float('inf') if total_profit > 0 else 0
-    
+
     balance = initial_balance
     peak_balance = initial_balance
     max_drawdown = 0
-    equity = [balance]
-    
+    equity_curve = [balance]
+
     for trade in trades:
         balance += trade["pnl"]
-        equity.append(balance)
+        equity_curve.append(balance)
         peak_balance = max(peak_balance, balance)
         drawdown = (peak_balance - balance) / peak_balance if peak_balance > 0 else 0
         max_drawdown = max(max_drawdown, drawdown)
-    
+
     returns = [t["pnl"] / initial_balance for t in trades]
     sharpe_ratio = np.mean(returns) / np.std(returns) * np.sqrt(252) if len(returns) > 1 and np.std(returns) > 0 else 0
-    
+
     final_balance = balance
     total_return = (final_balance - initial_balance) / initial_balance
-    
+
     return {
         "total_trades": len(trades), "win_rate": win_rate,
         "profit_factor": profit_factor, "max_drawdown": max_drawdown,

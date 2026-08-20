@@ -12,9 +12,9 @@ strategy:
 # ─── TRAILING STOP ──────────────────────────────────────────
 trailing:
   enabled: true
-  breakeven_at: 0.5
-  trail_activate: 1.0
-  trail_step: 0.5
+  breakeven_at: 0.3
+  trail_activate: 0.8
+  trail_step: 0.3
 
 # ─── RISK MANAGEMENT ───────────────────────────────────────
 risk:
@@ -31,13 +31,13 @@ risk:
 # ─── DYNAMIC RISK (DD + PF) ────────────────────────────────
 dynamic_risk:
   enabled: true
-  base_risk: 1.5         # Default risk
-  min_risk: 0.75         # Floor when DD > 10%
-  max_risk: 2.0          # Ceiling when PF(20) > 2.0 + DD < 3%
-  dd_threshold_1: 6.0    # DD > 6% → risk = 1.0
-  dd_threshold_2: 10.0   # DD > 10% → risk = 0.75
-  pf_hot: 2.0            # PF(20) > 2.0 + DD<3% → risk = 2.0
-  pf_window: 20          # Rolling window for PF calc
+  base_risk: 1.5
+  min_risk: 0.75
+  max_risk: 2.0
+  dd_threshold_1: 6.0
+  dd_threshold_2: 10.0
+  pf_hot: 2.0
+  pf_window: 20
 
 # ─── FILTERS ───────────────────────────────────────────────
 filters:
@@ -54,9 +54,10 @@ filters:
 
 # ─── AUTO-OPTIMIZATION ──────────────────────────────────────
 optimizer:
-  trigger_days: 30
-  trigger_trades: 20
+  trigger_days: 90
+  trigger_trades: 15
   trigger_pf_drop: 1.2
+  cooldown_trades: 30
   optimize_params:
     - lookback
     - sweep_threshold
@@ -72,104 +73,75 @@ optimizer:
   min_improvement: 0.10
 
 # ─── ASSETS ─────────────────────────────────────────────────
+# Rolling WF results (Aug 2026):
+#   DOGE: AVG PF=2.74, MIN PF=1.79 — best
+#   DOT:  AVG PF=2.32, MIN PF=1.54 — stable
+#   ETH:  AVG PF=2.15, MIN PF=1.42 — reliable
+#   BNB:  AVG PF=1.81, MIN PF=1.39 — baseline
 assets:
-  - symbol: BNBUSDT
+  - symbol: ETHUSDT
     enabled: true
-    data_file: data/raw/BNBUSDT_4h_12m.csv
-    # BNB: PF=4.53 WR=70% Ret=+27% DD=1.85% (46 trades, 12m)
-    # Best config: lb=12 sw=0.008 prox=0.012 tp=1.0 timeout=15 ADX=ON
-    # No extra filters — baseline already excellent
-    config:
-      strategy:
-        lookback: 12
-        sweep_threshold: 0.008
-        center_proximity: 0.012
-        tp_multiplier: 1.0
-        timeout: 15
-      filters:
-        adx_filter:
-          enabled: true
-          min_adx: 25
-      trailing:
-        enabled: true
-        breakeven_at: 0.5
-        trail_activate: 1.0
-        trail_step: 0.5
-
-  - symbol: RENDERUSDT
-    enabled: true
-    data_file: data/raw/RENDERUSDT_4h_12m.csv
-    # RENDER: PF=2.67 WR=46% Ret=+39% DD=3.17% (102 trades, 14m)
-    # OOS PF=3.39 Ret=+25% — ROBUST
-    # +session filter: OOS PF=2.76, Ret=+13% (v2 improvement)
-    config:
-      strategy:
-        lookback: 12
-        sweep_threshold: 0.008
-        center_proximity: 0.012
-        tp_multiplier: 1.0
-        timeout: 15
-      filters:
-        adx_filter:
-          enabled: true
-          min_adx: 25
-        session_filter:
-          enabled: true
-      trailing:
-        enabled: true
-        breakeven_at: 0.5
-        trail_activate: 1.0
-        trail_step: 0.5
-
-  - symbol: SOLUSDT
-    enabled: true
-    data_file: data/raw/SOLUSDT_4h_4y.csv
-    # SOL 4Y: PF=2.22, annual +19%, DD=5.5% (453 trades)
-    # Consistent every year: 2023 PF=1.64, 2024 PF=2.43, 2025 PF=2.26, 2026 PF=1.61
-    config:
-      strategy:
-        lookback: 12
-        sweep_threshold: 0.008
-        center_proximity: 0.012
-        tp_multiplier: 1.0
-        timeout: 15
-      filters:
-        adx_filter:
-          enabled: true
-          min_adx: 25
-      trailing:
-        enabled: true
-        breakeven_at: 0.5
-        trail_activate: 1.0
-        trail_step: 0.5
-
-  - symbol: LINKUSDT
-    enabled: true
-    lock_config: true
-    # LINK 12M optimized: PF=7.58, WR=52%, 23 trades
-    # Optimized config: lb=12 sw=0.005 prox=0.012 tp=1.0 tmo=15 ADX=30
+    # ETH rolling WF: AVG PF=2.15, MIN PF=1.42
     config:
       strategy:
         lookback: 12
         sweep_threshold: 0.005
-        center_proximity: 0.012
+        center_proximity: 0.015
         tp_multiplier: 1.0
-        timeout: 15
+        timeout: 20
       filters:
         adx_filter:
           enabled: true
-          min_adx: 30
+          min_adx: 25
       trailing:
         enabled: true
-        breakeven_at: 0.5
-        trail_activate: 1.0
-        trail_step: 0.5
+        breakeven_at: 0.3
+        trail_activate: 0.8
+        trail_step: 0.3
+
+  - symbol: BNBUSDT
+    enabled: true
+    # BNB rolling WF: AVG PF=1.81, MIN PF=1.39
+    config:
+      strategy:
+        lookback: 12
+        sweep_threshold: 0.008
+        center_proximity: 0.015
+        tp_multiplier: 1.0
+        timeout: 20
+      filters:
+        adx_filter:
+          enabled: true
+          min_adx: 25
+      trailing:
+        enabled: true
+        breakeven_at: 0.3
+        trail_activate: 0.8
+        trail_step: 0.3
 
   - symbol: DOGEUSDT
     enabled: true
-    lock_config: true
-    # DOGE 12M: PF=3.07, PnL=+$1204, DD=1.1% (29 trades)
-    # Optimized config: lb=8 sw=0.005 prox=0.012 tp=1.0 tmo=15 ADX=30
+    # DOGE rolling WF: AVG PF=2.74, MIN PF=1.79 — best performer
+    config:
+      strategy:
+        lookback: 12
+        sweep_threshold: 0.005
+        center_proximity: 0.015
+        tp_multiplier: 1.0
+        timeout: 20
+      filters:
+        adx_filter:
+          enabled: true
+          min_adx: 25
+      trailing:
+        enabled: true
+        breakeven_at: 0.3
+        trail_activate: 0.8
+        trail_step: 0.3
+
+  - symbol: DOTUSDT
+    enabled: true
+    # DOT rolling WF: AVG PF=2.32, MIN PF=1.54
     config:
       strategy:
         lookback: 8
@@ -180,12 +152,88 @@ assets:
       filters:
         adx_filter:
           enabled: true
+          min_adx: 25
+      trailing:
+        enabled: true
+        breakeven_at: 0.3
+        trail_activate: 0.8
+        trail_step: 0.3
+
+  - symbol: BTCUSDT
+    enabled: false
+    config:
+      strategy:
+        lookback: 12
+        sweep_threshold: 0.008
+        center_proximity: 0.012
+        tp_multiplier: 1.0
+        timeout: 15
+      filters:
+        adx_filter:
+          enabled: true
+          min_adx: 25
+      trailing:
+        enabled: true
+        breakeven_at: 0.3
+        trail_activate: 0.8
+        trail_step: 0.3
+
+  - symbol: SOLUSDT
+    enabled: false
+    config:
+      strategy:
+        lookback: 12
+        sweep_threshold: 0.008
+        center_proximity: 0.012
+        tp_multiplier: 1.0
+        timeout: 15
+      filters:
+        adx_filter:
+          enabled: true
+          min_adx: 25
+      trailing:
+        enabled: true
+        breakeven_at: 0.3
+        trail_activate: 0.8
+        trail_step: 0.3
+
+  - symbol: RENDERUSDT
+    enabled: false
+    config:
+      strategy:
+        lookback: 12
+        sweep_threshold: 0.008
+        center_proximity: 0.012
+        tp_multiplier: 1.0
+        timeout: 15
+      filters:
+        adx_filter:
+          enabled: true
+          min_adx: 25
+      trailing:
+        enabled: true
+        breakeven_at: 0.3
+        trail_activate: 0.8
+        trail_step: 0.3
+
+  - symbol: LINKUSDT
+    enabled: false
+    config:
+      strategy:
+        lookback: 12
+        sweep_threshold: 0.005
+        center_proximity: 0.012
+        tp_multiplier: 1.0
+        timeout: 15
+      filters:
+        adx_filter:
+          enabled: true
           min_adx: 30
       trailing:
         enabled: true
-        breakeven_at: 0.5
-        trail_activate: 1.0
-        trail_step: 0.5
+        breakeven_at: 0.3
+        trail_activate: 0.8
+        trail_step: 0.3
 
 # ─── NOTIFICATIONS ──────────────────────────────────────────
 notifications:

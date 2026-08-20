@@ -28,6 +28,10 @@ from smc_features import find_consolidation_center, detect_sweep, calculate_adx
 
 load_dotenv()
 
+# ─── CONSTANTS ──────────────────────────────────────────────────────
+CANDLE_INTERVAL = "240"  # 4H candles
+CANDLE_SECONDS = 4 * 3600  # 4H in seconds
+
 # ─── LOGGING ──────────────────────────────────────────────────────
 LOG_DIR = Path(__file__).parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
@@ -96,6 +100,7 @@ class SignalGenerator:
         self.sweep_direction = None
         self.sweep_price = None
         self.sweep_index = None
+        self.sweep_time = None  # timestamp of sweep candle
         self.center_at_sweep = None
         self.daily_bullish = None  # 1D EMA50 trend
     
@@ -131,6 +136,7 @@ class SignalGenerator:
                 self.sweep_direction = 'bearish'
                 self.sweep_price = current_high
                 self.sweep_index = candle_index
+                self.sweep_time = df['timestamp'].iloc[candle_index]
                 self.center_at_sweep = c
                 return None
             elif has_bullish:
@@ -138,6 +144,7 @@ class SignalGenerator:
                 self.sweep_direction = 'bullish'
                 self.sweep_price = current_low
                 self.sweep_index = candle_index
+                self.sweep_time = df['timestamp'].iloc[candle_index]
                 self.center_at_sweep = c
                 return None
         
@@ -162,6 +169,7 @@ class SignalGenerator:
                 if skip:
                     self.state = 0
                     self.sweep_direction = None
+                    self.sweep_time = None
                     return None
                 
                 # Session filter: only during London+NY (8:00-21:00 UTC)
@@ -171,6 +179,7 @@ class SignalGenerator:
                     if not (8 <= hour <= 21):
                         self.state = 0
                         self.sweep_direction = None
+                        self.sweep_time = None
                         return None
                 
                 # Генерируем сигнал
@@ -192,14 +201,17 @@ class SignalGenerator:
                     if direction == 'SELL' and self.daily_bullish:
                         self.state = 0
                         self.sweep_direction = None
+                        self.sweep_time = None
                         return None
                     if direction == 'BUY' and not self.daily_bullish:
                         self.state = 0
                         self.sweep_direction = None
+                        self.sweep_time = None
                         return None
                 
                 self.state = 0
                 self.sweep_direction = None
+                self.sweep_time = None
                 
                 return {
                     'direction': direction,
@@ -210,10 +222,15 @@ class SignalGenerator:
                     'confidence': 0.7,
                 }
             
-            # Timeout
-            elif candle_index - self.sweep_index > self.timeout:
-                self.state = 0
-                self.sweep_direction = None
+            # Timeout — based on timestamp, not candle index
+            elif self.sweep_time is not None:
+                current_time = df['timestamp'].iloc[candle_index]
+                elapsed_hours = (current_time - self.sweep_time).total_seconds() / 3600
+                if elapsed_hours > self.timeout * 4:  # timeout is in candles, 4H each
+                    logger.info(f"TIMEOUT {symbol}: {elapsed_hours:.1f}h elapsed > {self.timeout * 4}h limit")
+                    self.state = 0
+                    self.sweep_direction = None
+                    self.sweep_time = None
         
         return None
 
@@ -469,6 +486,12 @@ class SMCFractalBot:
         """Graceful shutdown."""
         logger.info("Shutdown signal received")
         self.running = False
+
+    @staticmethod
+    def _mask_token(text: str) -> str:
+        """Mask bot token in error messages to prevent log leaks."""
+        import re
+        return re.sub(r'bot\d+:.{35}', 'botXXX:***', text)
     
     def _restore_signal_states(self):
         """Restore signal generator states from Redis."""
@@ -484,6 +507,12 @@ class SMCFractalBot:
                     gen.sweep_price = state.get('sweep_price')
                     gen.sweep_index = state.get('sweep_index')
                     gen.center_at_sweep = state.get('center_at_sweep')
+                    sweep_time_str = state.get('sweep_time')
+                    if sweep_time_str:
+                        try:
+                            gen.sweep_time = pd.Timestamp(sweep_time_str)
+                        except Exception:
+                            pass
                 logger.info(f"RESTORE SIGNAL STATE: {symbol} state={state.get('state', 0)}")
     
     def _save_signal_state(self, symbol: str):
@@ -498,6 +527,7 @@ class SMCFractalBot:
                 'sweep_price': gen.sweep_price,
                 'sweep_index': gen.sweep_index,
                 'center_at_sweep': gen.center_at_sweep,
+                'sweep_time': str(gen.sweep_time) if gen.sweep_time is not None else None,
             })
         except Exception as e:
             logger.error(f"Redis save signal state failed: {e}")
@@ -576,7 +606,7 @@ class SMCFractalBot:
         """Один цикл обработки для символа."""
         
         # 1. Получить свечи
-        df = self.fetch_candles(symbol, interval="240", limit=200)
+        df = self.fetch_candles(symbol, interval=CANDLE_INTERVAL, limit=200)
         sig_gen = self.signal_gens.get(symbol, self.signal_gen)
         if df.empty or len(df) < sig_gen.lookback + 5:
             return
@@ -627,6 +657,7 @@ class SMCFractalBot:
                     new_gen.sweep_price = old_gen.sweep_price
                     new_gen.sweep_index = old_gen.sweep_index
                     new_gen.center_at_sweep = old_gen.center_at_sweep
+                    new_gen.sweep_time = old_gen.sweep_time
                 self.signal_gens[symbol] = new_gen
                 logger.info(f"REGIME ADAPT {symbol}: {regime['regime']} → params updated")
             elif regime['regime'] != 'sideways':
@@ -636,7 +667,7 @@ class SMCFractalBot:
         # 3. Trailing update для открытой позиции
         if self.tracker.has_position(symbol):
             last = df.iloc[-1]
-            new_stop = self.trailing.update(symbol, last['high'], last['low'], last['close'])
+            self.trailing.update(symbol, last['high'], last['low'], last['close'])
             
             # Проверить SL/TP
             exit_result = self.tracker.check_exits(
@@ -645,7 +676,15 @@ class SMCFractalBot:
             if exit_result:
                 logger.info(f"EXIT: {symbol} {exit_result['exit_reason']} PnL={exit_result['pnl']:.2f}")
                 self.risk.register_trade(exit_result['pnl'])
-                self.executor.close_position(symbol)
+                close_result = self.executor.close_position(symbol)
+                if not close_result.success:
+                    logger.error(f"CLOSE FAILED {symbol}: {close_result.message} — position may still be open!")
+                    # Retry once
+                    import time as _time
+                    _time.sleep(1)
+                    close_result = self.executor.close_position(symbol)
+                    if not close_result.success:
+                        logger.critical(f"CLOSE RETRY FAILED {symbol}: {close_result.message} — NAKED RISK")
                 self.last_trade_close[symbol] = time.time()
                 # Persist cooldown to Redis
                 if self.redis:
@@ -670,7 +709,7 @@ class SMCFractalBot:
         if not self.tracker.has_position(symbol):
             # Cooldown: skip if trade closed recently (wait for new 4H candle)
             last_close = self.last_trade_close.get(symbol, 0)
-            candle_interval = 4 * 3600  # 4H = 14400 seconds
+            candle_interval = CANDLE_SECONDS
             if time.time() - last_close < candle_interval:
                 logger.debug(f"Cooldown active for {symbol} — skip ({int((candle_interval - (time.time() - last_close))/60)}min left)")
                 return  # Skip — wait for new candle
@@ -739,7 +778,7 @@ class SMCFractalBot:
                         except Exception as e:
                             logger.error(f"TG cmd error: {e}")
                 except Exception as e:
-                    logger.debug(f"TG poll error: {e}")
+                    logger.debug(f"TG poll error: {_mask_token(str(e))}")
                 time.sleep(2)
         
         t = threading.Thread(target=_poll_loop, daemon=True, name="tg-commands")
@@ -747,7 +786,10 @@ class SMCFractalBot:
         logger.info("Telegram command listener started")
 
     def _handle_telegram_command(self, text: str):
-        """Handle a Telegram command."""
+        """Handle a Telegram command (thread-safe — snapshots shared state)."""
+        # Snapshot shared state to avoid mid-mutation reads
+        positions_snapshot = dict(self.tracker.positions)
+        regime_snapshot = dict(self.regime_state)
         balance = self.client.get_wallet_balance()
         equity = float(balance.get('totalEquity', 0)) if balance else 0
         available = float(balance.get('availableToWithdraw', 0)) if balance else 0
@@ -755,18 +797,18 @@ class SMCFractalBot:
         if text == '/report' or text == '/status':
             risk_status = self.risk.get_status()
             report = self.reporter.build_status_report(
-                equity, self.tracker.positions, risk_status, self.regime_state)
+                equity, positions_snapshot, risk_status, regime_snapshot)
             self.notifier._send(report)
         elif text == '/daily':
             report = self.reporter.build_daily_report(
-                equity, self.tracker.positions, self.regime_state)
+                equity, positions_snapshot, regime_snapshot)
             self.notifier._send(report)
         elif text == '/weekly':
             report = self.reporter.build_weekly_report(
-                equity, self.tracker.positions, self.regime_state)
+                equity, positions_snapshot, regime_snapshot)
             self.notifier._send(report)
         elif text == '/balance':
-            positions = self.tracker.positions
+            positions = positions_snapshot
             pos_text = ""
             for sym, pos in positions.items():
                 e = "+" if pos.side == "LONG" else "-"
@@ -902,7 +944,7 @@ class SMCFractalBot:
                         continue
 
                     if self.optimizer.should_optimize(symbol, trades, days_running, pf, daily_dd):
-                        df = self.fetch_candles(symbol, interval="240", limit=500)
+                        df = self.fetch_candles(symbol, interval=CANDLE_INTERVAL, limit=500)
                         if len(df) > 100:
                             current_params = self._get_symbol_strategy(symbol)
                             current_filters = self._get_symbol_filters(symbol)
@@ -929,15 +971,15 @@ class SMCFractalBot:
                                     new_gen.sweep_price = old_gen.sweep_price
                                     new_gen.sweep_index = old_gen.sweep_index
                                     new_gen.center_at_sweep = old_gen.center_at_sweep
+                                    new_gen.sweep_time = old_gen.sweep_time
                                 self.signal_gens[symbol] = new_gen
                                 
                                 # Log for weekly report
                                 self.reporter.log_optimization(symbol, current_params, result['strategy'])
                                 
                                 logger.info(f"APPLIED NEW CONFIG for {symbol}: {result}")
-                                self.notifier.send_error(
-                                    f"Auto-optimized {symbol}: PF improvement",
-                                    "AUTO-OPTIMIZE"
+                                self.notifier.send_status(
+                                    f"Auto-optimized {symbol}: PF improvement"
                                 )
                     
                     self._save_optimize_check(symbol, now)

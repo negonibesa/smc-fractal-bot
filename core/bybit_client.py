@@ -64,34 +64,43 @@ class BybitClient:
     
     def _request(self, method: str, endpoint: str, params: Optional[Dict] = None,
                  signed: bool = False) -> Dict:
-        """Make API request (thread-safe)."""
+        """Make API request (thread-safe with 429 retry)."""
         with self._lock:
-            url = f"{self.BASE_URL}{endpoint}"
+            for attempt in range(3):
+                url = f"{self.BASE_URL}{endpoint}"
+                
+                if signed:
+                    timestamp = int(time.time() * 1000) + self._time_offset
+                    params = params or {}
+                    params["timestamp"] = timestamp
+                    use_json = (method == "POST")
+                    signature = self._sign(params, timestamp, use_json=use_json)
+                    self.session.headers.update({
+                        "X-BAPI-API-KEY": self.api_key,
+                        "X-BAPI-TIMESTAMP": str(timestamp),
+                        "X-BAPI-SIGN": signature,
+                        "X-BAPI-RECV-WINDOW": "50000",
+                    })
+                
+                if method == "GET":
+                    resp = self.session.get(url, params=params, timeout=30)
+                else:
+                    resp = self.session.post(url, json=params, timeout=30)
+                
+                if resp.status_code == 429:
+                    retry_after = int(resp.headers.get('Retry-After', 5))
+                    logger.warning(f"Rate limited (429), retry in {retry_after}s (attempt {attempt+1}/3)")
+                    time.sleep(retry_after)
+                    continue
+                
+                data = resp.json()
+                
+                if data.get("retCode") != 0:
+                    raise Exception(f"Bybit API error: {data.get('retMsg', 'Unknown')} (code={data.get('retCode')})")
+                
+                return data.get("result", {})
             
-            if signed:
-                timestamp = int(time.time() * 1000) + self._time_offset
-                params = params or {}
-                params["timestamp"] = timestamp
-                use_json = (method == "POST")
-                signature = self._sign(params, timestamp, use_json=use_json)
-                self.session.headers.update({
-                    "X-BAPI-API-KEY": self.api_key,
-                    "X-BAPI-TIMESTAMP": str(timestamp),
-                    "X-BAPI-SIGN": signature,
-                    "X-BAPI-RECV-WINDOW": "50000",
-                })
-            
-            if method == "GET":
-                resp = self.session.get(url, params=params, timeout=30)
-            else:
-                resp = self.session.post(url, json=params, timeout=30)
-            
-            data = resp.json()
-            
-            if data.get("retCode") != 0:
-                raise Exception(f"Bybit API error: {data.get('retMsg', 'Unknown')} (code={data.get('retCode')})")
-            
-            return data.get("result", {})
+            raise Exception("Rate limited: 3 retries exhausted")
     
     # ─── MARKET DATA ─────────────────────────────────────────────
     

@@ -649,6 +649,7 @@ class SMCFractalBot:
             last_close = self.last_trade_close.get(symbol, 0)
             candle_interval = 4 * 3600  # 4H = 14400 seconds
             if time.time() - last_close < candle_interval:
+                logger.debug(f"Cooldown active for {symbol} — skip ({int((candle_interval - (time.time() - last_close))/60)}min left)")
                 return  # Skip — wait for new candle
             
             # Используем предпоследнюю свечу (текущая ещё не закрыта)

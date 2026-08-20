@@ -1,0 +1,16 @@
+BACKTEST BASELINE — 2026-08-20 01:50 UTC
+200 candles 4H, new code (margin model, entry+exit commission, equity DD)
+
+Pair       Trades  Win%   PF     Return   Max DD   Verdict
+BNB        2       100%   inf    +3.0%    0.0%     ✅
+RENDER     3       33%    4.08   +0.7%    0.2%     ✅
+SOL        4       50%    7.60   +1.2%    0.1%     ✅
+LINK       10      30%    0.74   -0.6%    1.5%     🔴
+DOGE       7       57%    1.20   +0.7%    2.1%     🟡
+
+Current configs:
+  BNB:    lb=12 sw=0.008 prox=0.012 tp=1.0 tmo=15 ADX=25
+  RENDER: lb=12 sw=0.008 prox=0.012 tp=1.0 tmo=15 ADX=25 +session
+  SOL:    lb=12 sw=0.008 prox=0.012 tp=1.0 tmo=15 ADX=25
+  LINK:   lb=12 sw=0.005 prox=0.012 tp=1.0 tmo=15 ADX=30 (locked)
+  DOGE:   lb=8  sw=0.005 prox=0.012 tp=1.0 tmo=15 ADX=30 (locked)

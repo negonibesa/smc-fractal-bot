@@ -1,0 +1,195 @@
+# SMC FRACTAL BOT — CONFIGURATION
+# Multi-pair config with per-pair settings
+
+# ─── STRATEGY PARAMETERS (default) ───────────────────────────
+strategy:
+  lookback: 12
+  sweep_threshold: 0.008
+  center_proximity: 0.012
+  tp_multiplier: 1.0
+  timeout: 15
+
+# ─── TRAILING STOP ──────────────────────────────────────────
+trailing:
+  enabled: true
+  breakeven_at: 0.5
+  trail_activate: 1.0
+  trail_step: 0.5
+
+# ─── RISK MANAGEMENT ───────────────────────────────────────
+risk:
+  risk_percent: 1.0
+  commission: 0.001
+  slippage: 0.0005
+  stop_buffer: 0.002
+  max_drawdown: 10.0
+  max_daily_loss: 5.0
+  max_consecutive_losses: 3
+  max_daily_trades: 20
+  max_leverage: 10
+
+# ─── DYNAMIC RISK (DD + PF) ────────────────────────────────
+dynamic_risk:
+  enabled: true
+  base_risk: 1.5         # Default risk
+  min_risk: 0.75         # Floor when DD > 10%
+  max_risk: 2.0          # Ceiling when PF(20) > 2.0 + DD < 3%
+  dd_threshold_1: 6.0    # DD > 6% → risk = 1.0
+  dd_threshold_2: 10.0   # DD > 10% → risk = 0.75
+  pf_hot: 2.0            # PF(20) > 2.0 + DD<3% → risk = 2.0
+  pf_window: 20          # Rolling window for PF calc
+
+# ─── FILTERS ───────────────────────────────────────────────
+filters:
+  adx_filter:
+    enabled: true
+    min_adx: 25
+  vwap_filter:
+    enabled: false
+  session_filter:
+    enabled: false
+  volume_filter:
+    enabled: false
+    volume_multiplier: 1.5
+
+# ─── AUTO-OPTIMIZATION ──────────────────────────────────────
+optimizer:
+  trigger_days: 30
+  trigger_trades: 20
+  trigger_pf_drop: 1.2
+  optimize_params:
+    - lookback
+    - sweep_threshold
+    - center_proximity
+    - tp_multiplier
+    - timeout
+  param_ranges:
+    lookback: [8, 12]
+    sweep_threshold: [0.005, 0.008, 0.012]
+    center_proximity: [0.005, 0.008, 0.012]
+    tp_multiplier: [1.0, 2.0]
+    timeout: [6, 15]
+  min_improvement: 0.10
+
+# ─── ASSETS ─────────────────────────────────────────────────
+assets:
+  - symbol: BNBUSDT
+    enabled: true
+    data_file: data/raw/BNBUSDT_4h_12m.csv
+    # BNB: PF=4.53 WR=70% Ret=+27% DD=1.85% (46 trades, 12m)
+    # Best config: lb=12 sw=0.008 prox=0.012 tp=1.0 timeout=15 ADX=ON
+    # No extra filters — baseline already excellent
+    config:
+      strategy:
+        lookback: 12
+        sweep_threshold: 0.008
+        center_proximity: 0.012
+        tp_multiplier: 1.0
+        timeout: 15
+      filters:
+        adx_filter:
+          enabled: true
+          min_adx: 25
+      trailing:
+        enabled: true
+        breakeven_at: 0.5
+        trail_activate: 1.0
+        trail_step: 0.5
+
+  - symbol: RENDERUSDT
+    enabled: true
+    data_file: data/raw/RENDERUSDT_4h_12m.csv
+    # RENDER: PF=2.67 WR=46% Ret=+39% DD=3.17% (102 trades, 14m)
+    # OOS PF=3.39 Ret=+25% — ROBUST
+    # +session filter: OOS PF=2.76, Ret=+13% (v2 improvement)
+    config:
+      strategy:
+        lookback: 12
+        sweep_threshold: 0.008
+        center_proximity: 0.012
+        tp_multiplier: 1.0
+        timeout: 15
+      filters:
+        adx_filter:
+          enabled: true
+          min_adx: 25
+        session_filter:
+          enabled: true
+      trailing:
+        enabled: true
+        breakeven_at: 0.5
+        trail_activate: 1.0
+        trail_step: 0.5
+
+  - symbol: SOLUSDT
+    enabled: true
+    data_file: data/raw/SOLUSDT_4h_4y.csv
+    # SOL 4Y: PF=2.22, annual +19%, DD=5.5% (453 trades)
+    # Consistent every year: 2023 PF=1.64, 2024 PF=2.43, 2025 PF=2.26, 2026 PF=1.61
+    config:
+      strategy:
+        lookback: 12
+        sweep_threshold: 0.008
+        center_proximity: 0.012
+        tp_multiplier: 1.0
+        timeout: 15
+      filters:
+        adx_filter:
+          enabled: true
+          min_adx: 25
+      trailing:
+        enabled: true
+        breakeven_at: 0.5
+        trail_activate: 1.0
+        trail_step: 0.5
+
+  - symbol: LINKUSDT
+    enabled: true
+    lock_config: true
+    # LINK 12M optimized: PF=7.58, WR=52%, 23 trades
+    # Optimized config: lb=12 sw=0.005 prox=0.012 tp=1.0 tmo=15 ADX=30
+    config:
+      strategy:
+        lookback: 12
+        sweep_threshold: 0.005
+        center_proximity: 0.012
+        tp_multiplier: 1.0
+        timeout: 15
+      filters:
+        adx_filter:
+          enabled: true
+          min_adx: 30
+      trailing:
+        enabled: true
+        breakeven_at: 0.5
+        trail_activate: 1.0
+        trail_step: 0.5
+
+  - symbol: DOGEUSDT
+    enabled: true
+    lock_config: true
+    # DOGE 12M: PF=3.07, PnL=+$1204, DD=1.1% (29 trades)
+    # Optimized config: lb=8 sw=0.005 prox=0.012 tp=1.0 tmo=15 ADX=30
+    config:
+      strategy:
+        lookback: 8
+        sweep_threshold: 0.005
+        center_proximity: 0.012
+        tp_multiplier: 1.0
+        timeout: 15
+      filters:
+        adx_filter:
+          enabled: true
+          min_adx: 30
+      trailing:
+        enabled: true
+        breakeven_at: 0.5
+        trail_activate: 1.0
+        trail_step: 0.5
+
+# ─── NOTIFICATIONS ──────────────────────────────────────────
+notifications:
+  telegram:
+    enabled: false
+    bot_token: ""
+    chat_id: ""

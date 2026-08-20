@@ -389,23 +389,32 @@ class SMCFractalBot:
                     pass
         except Exception as e:
             logger.warning(f"Failed to restore start_equity: {e}")
-        self.last_optimize_check = {}
+        self.last_optimize_check = {}  # symbol → datetime
         self.last_trade_close = {}  # symbol → timestamp of last trade close (cooldown)
         
         # Restore cooldown timestamps from Redis
         if self.redis:
             try:
                 meta = self.redis.load_meta()
-                if meta and 'last_trade_close' in meta:
-                    saved_close = meta['last_trade_close']
+                if meta:
+                    # Restore cooldown
+                    saved_close = meta.get('last_trade_close', {})
                     now = time.time()
                     for sym, ts in saved_close.items():
-                        # Only restore if within cooldown window (4H)
                         if now - ts < 4 * 3600:
                             self.last_trade_close[sym] = ts
                             logger.info(f"RESTORE COOLDOWN: {sym} — {int((4*3600 - (now-ts))/60)}min left")
+                    # Restore optimize check timestamps
+                    saved_opt = meta.get('last_optimize_check', {})
+                    for sym, ts_str in saved_opt.items():
+                        try:
+                            self.last_optimize_check[sym] = datetime.fromisoformat(ts_str)
+                        except Exception:
+                            pass
+                    if saved_opt:
+                        logger.info(f"RESTORE OPTIMIZE CHECK: {len(saved_opt)} symbols")
             except Exception as e:
-                logger.warning(f"Failed to restore cooldown: {e}")
+                logger.warning(f"Failed to restore meta: {e}")
         
         # Reporter (daily/weekly reports)
         self.reporter = Reporter(redis_store=self.redis, notifier=self.notifier)
@@ -492,6 +501,20 @@ class SMCFractalBot:
             })
         except Exception as e:
             logger.error(f"Redis save signal state failed: {e}")
+
+    def _save_optimize_check(self, symbol: str, dt: datetime):
+        """Save last optimize check timestamp to Redis."""
+        self.last_optimize_check[symbol] = dt
+        if not self.redis:
+            return
+        try:
+            meta = self.redis.load_meta() or {}
+            meta['last_optimize_check'] = {
+                k: v.isoformat() for k, v in self.last_optimize_check.items()
+            }
+            self.redis.save_meta(meta)
+        except Exception as e:
+            logger.error(f"Redis save optimize check failed: {e}")
     
     def _get_symbol_strategy(self, symbol: str) -> dict:
         """Get strategy params for a specific symbol."""
@@ -875,7 +898,7 @@ class SMCFractalBot:
                         daily_dd = 0
 
                     if symbol in self.locked_configs:
-                        self.last_optimize_check[symbol] = now
+                        self._save_optimize_check(symbol, now)
                         continue
 
                     if self.optimizer.should_optimize(symbol, trades, days_running, pf, daily_dd):
@@ -917,7 +940,7 @@ class SMCFractalBot:
                                     "AUTO-OPTIMIZE"
                                 )
                     
-                    self.last_optimize_check[symbol] = now
+                    self._save_optimize_check(symbol, now)
                 except Exception as e:
                     logger.error(f"Auto-opt check failed for {symbol}: {e}")
             

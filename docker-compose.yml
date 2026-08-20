@@ -10,12 +10,18 @@ services:
       - redis-data:/data
     restart: unless-stopped
     command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
 
   bot:
     build: .
     container_name: smc-bot
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     ports:
       - "80:80"
     environment:

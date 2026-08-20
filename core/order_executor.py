@@ -80,6 +80,15 @@ class OrderExecutor:
                        risk_percent: Optional[float] = None) -> OrderResult:
         """Общий метод входа: расчёт размера → маркет → SL/TP."""
         try:
+            # 0. Проверить pending ордера — пропускаем вход если есть
+            try:
+                pending = self.client.get_open_orders(symbol)
+                if pending:
+                    logger.warning(f"ENTRY BLOCKED: {symbol} has {len(pending)} pending orders, skipping")
+                    return OrderResult(False, message=f"Pending orders exist for {symbol}")
+            except Exception as e:
+                logger.warning(f"Pending order check failed: {e}")
+
             # 1. Получить параметры инструмента
             inst = self._get_instrument(symbol)
             
@@ -105,6 +114,27 @@ class OrderExecutor:
             logger.info(f"EXEC {side} {qty_str} {symbol} @ market")
             result = self.client.place_market_order(symbol, side, qty_str)
             order_id = result.get('orderId', '')
+
+            # 4b. Verify fill status (detect stuck orders)
+            import time as _time
+            for _attempt in range(5):
+                try:
+                    orders = self.client.get_open_orders(symbol)
+                    unfilled = [o for o in orders if o.get('orderId') == order_id]
+                    if not unfilled:
+                        break  # filled or gone
+                    logger.warning(f"Order {order_id} still pending (attempt {_attempt+1}/5)")
+                    _time.sleep(2)
+                except Exception:
+                    break
+            else:
+                # After 5 attempts still pending — cancel and report
+                logger.error(f"Order {order_id} stuck after 5 checks, cancelling")
+                try:
+                    self.client.cancel_order(symbol, order_id)
+                except Exception:
+                    pass
+                return OrderResult(False, order_id=order_id, message=f"Order stuck: {order_id}")
             
             # 5. Ставим SL + TP
             sl_str = self._round_price(stop, inst['tick_size'])
@@ -144,13 +174,20 @@ class OrderExecutor:
             
             if not sl_tp_ok:
                 logger.error(f"SL/TP FAILED for {symbol} — closing position immediately")
-                try:
-                    close_side = opposite_side
-                    self.client.place_market_order(symbol, close_side, qty_str, reduce_only=True)
-                    logger.info(f"Emergency close OK: {symbol}")
-                except Exception as e3:
-                    logger.error(f"Emergency close FAILED: {e3} — position NAKED on exchange!")
-                    return OrderResult(False, order_id=order_id, message=f"Naked position! SL/TP and close both failed", filled_qty=float(qty_str), sl_tp_ok=False)
+                close_success = False
+                for attempt in range(3):
+                    try:
+                        close_side = opposite_side
+                        self.client.place_market_order(symbol, close_side, qty_str, reduce_only=True)
+                        logger.info(f"Emergency close OK on attempt {attempt+1}: {symbol}")
+                        close_success = True
+                        break
+                    except Exception as e3:
+                        logger.error(f"Emergency close attempt {attempt+1} failed: {e3}")
+                        _time.sleep(1)
+                if not close_success:
+                    logger.critical(f"EMERGENCY CLOSE FAILED AFTER 3 ATTEMPTS: {symbol} — NAKED POSITION!")
+                    return OrderResult(False, order_id=order_id, message=f"Naked position! All close attempts failed", filled_qty=float(qty_str), sl_tp_ok=False)
             
             return OrderResult(True, order_id=order_id, message=f"Opened {side} {qty_str}", filled_qty=float(qty_str), sl_tp_ok=sl_tp_ok)
         

@@ -3,6 +3,7 @@ import pandas as pd
 import logging
 from typing import List, Dict, Tuple, Optional
 from pathlib import Path
+from datetime import timedelta
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -19,20 +20,21 @@ def run_backtest(
     breakeven_at: float = 0.5,
     trailing_activate: float = 1.0,
     trailing_step: float = 0.5,
-    max_leverage: float = 20.0,
+    max_leverage: float = 10.0,
     dynamic_risk: dict = None,
+    cooldown_hours: float = 4.0,
+    max_daily_loss_pct: float = 5.0,
+    max_daily_trades: int = 20,
+    funding_rates: pd.DataFrame = None,
 ) -> Tuple[List[dict], dict]:
     """
-    Backtest with trailing stop, breakeven, dynamic risk (DD + PF).
-
-    Balance model (cash-flow, correctly for LONG and SHORT):
-      LONG  entry:  balance -= margin + commission
-      LONG  exit:   balance += margin + pnl - commission
-      SHORT entry:  balance -= margin + commission  (margin locked as collateral)
-      SHORT exit:   balance += margin + pnl - commission
-
-    equity = balance when flat; during a position equity includes unrealized PnL.
-    Dynamic risk and DD are computed on equity, not raw balance.
+    Backtest matching live bot behavior:
+      - Margin model (balance stays positive)
+      - Entry + exit commission
+      - Entry + exit slippage
+      - Cooldown between trades (default 4H)
+      - Circuit breakers: max daily loss, max daily trades
+      - Dynamic risk (DD + PF)
     """
     trades = []
     balance = initial_balance
@@ -46,7 +48,14 @@ def run_backtest(
     direction = None
     original_stop = 0.0
     highest_pnl = 0.0
-    margin_used = 0.0  # margin locked at entry
+    margin_used = 0.0
+
+    last_trade_time = None  # for cooldown
+    daily_pnl = 0.0
+    daily_trades = 0
+    current_day = None
+    funding_accrued = 0.0
+    total_funding = 0.0
 
     # Dynamic risk params
     dr_base = dynamic_risk.get('base_risk', 1.5) if dynamic_risk else risk_percent
@@ -65,7 +74,6 @@ def run_backtest(
             signals_dict[s['index']] = s
 
     def _calc_equity(pos, ep, sp, dir_, current_p):
-        """Compute equity given current state."""
         if pos == 0:
             return balance
         risk_u = abs(ep - sp)
@@ -80,15 +88,18 @@ def run_backtest(
     def _close_position(exit_p, reason, current_time):
         nonlocal position, entry_price, stop_price, tp_price, direction
         nonlocal original_stop, highest_pnl, balance, equity, margin_used, peak_equity
+        nonlocal daily_pnl, daily_trades, funding_accrued
 
         if direction == 'LONG':
             raw_pnl = position * (exit_p - entry_price)
         else:
             raw_pnl = position * (entry_price - exit_p)
 
-        pnl = raw_pnl - abs(position) * entry_price * commission - abs(position) * exit_p * commission
-
+        pnl = raw_pnl - abs(position) * entry_price * commission - abs(position) * exit_p * commission - funding_accrued
         balance += margin_used + raw_pnl - abs(position) * exit_p * commission
+
+        daily_pnl += pnl
+        daily_trades += 1
 
         trades.append({
             'entry_time': entry_time, 'exit_time': current_time,
@@ -98,6 +109,7 @@ def run_backtest(
         })
 
         position = 0
+        funding_accrued = 0.0
         direction = None
         margin_used = 0.0
         equity = balance
@@ -113,6 +125,36 @@ def run_backtest(
         if signal is None:
             signal = signals_dict.get(i) if i in signals_dict else None
 
+        # Reset daily counters
+        ts = df['timestamp'].iloc[i]
+        day = ts.date() if hasattr(ts, 'date') else None
+        if day != current_day:
+            current_day = day
+            daily_pnl = 0.0
+            daily_trades = 0
+
+        # ─── Funding rate deduction ────────────────────────────────
+        if position != 0 and funding_rates is not None and len(funding_rates) > 0:
+            candle_ts = df['timestamp'].iloc[i]
+            candle_start = candle_ts
+            candle_end = candle_ts + timedelta(hours=4) if hasattr(candle_ts, 'hour') else candle_ts
+            # Find funding events within this candle
+            mask = (funding_rates['timestamp'] >= candle_start) & (funding_rates['timestamp'] < candle_end)
+            fr_events = funding_rates.loc[mask]
+            for _, fr_row in fr_events.iterrows():
+                rate = fr_row['rate']
+                notional = abs(position) * current_price
+                funding_cost = notional * rate
+                # LONG pays when rate > 0, SHORT pays when rate < 0
+                if direction == 'LONG':
+                    balance -= funding_cost
+                    funding_accrued += funding_cost
+                else:
+                    balance += funding_cost  # SHORT receives when rate > 0
+                    funding_accrued -= funding_cost
+                total_funding += abs(funding_cost)
+                equity = _calc_equity(position, entry_price, stop_price, direction, current_price)
+
         # ─── Position management ──────────────────────────────────
         if position != 0:
             risk_unit = abs(entry_price - original_stop)
@@ -124,7 +166,6 @@ def run_backtest(
 
             highest_pnl = max(highest_pnl, current_pnl_risk)
 
-            # Breakeven
             if breakeven_at > 0 and highest_pnl >= breakeven_at:
                 if direction == 'LONG':
                     new_stop = entry_price + entry_price * commission
@@ -135,7 +176,6 @@ def run_backtest(
                     if new_stop < stop_price:
                         stop_price = new_stop
 
-            # Trailing stop
             if trailing_activate > 0 and trailing_step > 0 and highest_pnl >= trailing_activate:
                 trail_distance = risk_unit * trailing_step
                 if direction == 'LONG':
@@ -147,7 +187,6 @@ def run_backtest(
                     if new_stop < stop_price:
                         stop_price = new_stop
 
-            # Check stop loss
             if direction == 'LONG' and low <= stop_price:
                 exit_price = stop_price * (1 - slippage)
                 exit_reason = 'STOP_LOSS'
@@ -162,7 +201,6 @@ def run_backtest(
                     exit_reason = 'BREAKEVEN' if abs(entry_price - stop_price) < risk_unit * 0.1 else 'TRAILING_STOP'
                 _close_position(exit_price, exit_reason, current_time)
 
-            # Check take profit
             elif direction == 'LONG' and high >= tp_price:
                 exit_price = tp_price * (1 - slippage)
                 _close_position(exit_price, 'TAKE_PROFIT', current_time)
@@ -171,13 +209,26 @@ def run_backtest(
                 exit_price = tp_price * (1 + slippage)
                 _close_position(exit_price, 'TAKE_PROFIT', current_time)
 
-            # Update equity while position is open
             if position != 0:
                 equity = _calc_equity(position, entry_price, stop_price, direction, current_price)
                 peak_equity = max(peak_equity, equity)
 
         # ─── Entry ────────────────────────────────────────────────
         if position == 0 and signal is not None:
+            # Circuit breakers
+            if daily_trades >= max_daily_trades:
+                continue
+            if daily_pnl < 0 and equity > 0 and abs(daily_pnl) / equity * 100 >= max_daily_loss_pct:
+                continue
+
+            # Cooldown
+            if last_trade_time is not None:
+                ts = df['timestamp'].iloc[i]
+                if hasattr(ts, 'timestamp'):
+                    elapsed_h = (ts - last_trade_time).total_seconds() / 3600
+                    if elapsed_h < cooldown_hours:
+                        continue
+
             current_risk = risk_percent
             if dynamic_risk:
                 dd_pct = (peak_equity - equity) / peak_equity * 100 if peak_equity > 0 else 0
@@ -197,7 +248,7 @@ def run_backtest(
 
             signal_type = signal.get('direction') or signal.get('signal')
             if signal_type in ['BUY', 'LONG']:
-                entry_price = signal.get('entry', current_price)
+                entry_price = signal.get('entry', current_price) * (1 + slippage)
                 stop_price = signal.get('stop')
                 tp_price = signal.get('tp')
 
@@ -226,10 +277,12 @@ def run_backtest(
                 balance -= margin_used + entry_commission
                 direction = 'LONG'
                 entry_time = current_time
+                funding_accrued = 0.0
+                last_trade_time = df['timestamp'].iloc[i]
                 equity = margin_used
 
             elif signal_type in ['SELL', 'SHORT']:
-                entry_price = signal.get('entry', current_price)
+                entry_price = signal.get('entry', current_price) * (1 - slippage)
                 stop_price = signal.get('stop')
                 tp_price = signal.get('tp')
 
@@ -258,6 +311,8 @@ def run_backtest(
                 balance -= margin_used + entry_commission
                 direction = 'SHORT'
                 entry_time = current_time
+                funding_accrued = 0.0
+                last_trade_time = df['timestamp'].iloc[i]
                 equity = margin_used
 
         # ─── Exit on opposite signal ─────────────────────────────
@@ -271,7 +326,6 @@ def run_backtest(
                     exit_price = current_price * (1 + slippage)
                 _close_position(exit_price, 'SIGNAL', current_time)
 
-    # Close last position
     if position != 0:
         final_price = df['close'].iloc[-1]
         if direction == 'LONG':
@@ -282,6 +336,7 @@ def run_backtest(
                         df.index[-1] if df.index is not None else len(df) - 1)
 
     metrics = calculate_backtest_metrics(trades, initial_balance)
+    metrics['total_funding'] = total_funding
     return trades, metrics
 
 
@@ -350,7 +405,6 @@ def save_backtest_report(metrics: dict, trades: List[dict], save_path: str):
 
 
 def _calc_pf_last_n(trades: List[dict], n: int = 20) -> float:
-    """PF за последние N сделок."""
     if len(trades) < 2:
         return 0
     recent = trades[-n:]

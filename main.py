@@ -827,7 +827,11 @@ class SMCFractalBot:
                         except Exception as e:
                             logger.error(f"TG cmd error: {e}")
                 except Exception as e:
-                    logger.debug(f"TG poll error: {_mask_token(str(e))}")
+                    try:
+                        msg = self._mask_token(str(e))
+                    except Exception:
+                        msg = str(e)[:200]
+                    logger.debug(f"TG poll error: {msg}")
                 time.sleep(2)
         
         t = threading.Thread(target=_poll_loop, daemon=True, name="tg-commands")

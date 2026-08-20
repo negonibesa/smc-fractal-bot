@@ -79,7 +79,13 @@ def generate_param_combos(ranges: dict, max_combos: int = 50) -> list[dict]:
 
 
 def run_walk_forward(df: pd.DataFrame, params: dict, filters: dict, 
-                     trailing: dict, n_splits: int = 3) -> Optional[dict]:
+                     trailing: dict, n_splits: int = 3,
+                     commission: float = 0.001, slippage: float = 0.0005,
+                     stop_buffer: float = 0.002, max_leverage: float = 10.0,
+                     dynamic_risk: dict = None,
+                     cooldown_hours: float = 4.0,
+                     max_daily_loss_pct: float = 5.0,
+                     max_daily_trades: int = 20) -> Optional[dict]:
     """
     Run walk-forward test on df with given params.
     Uses the real SignalGenerator (same logic as live) to avoid duplication.
@@ -120,9 +126,14 @@ def run_walk_forward(df: pd.DataFrame, params: dict, filters: dict,
             return None
         
         _, metrics = run_backtest(bt_df, bs, initial_balance=10000, risk_percent=1.0,
+            commission=commission, slippage=slippage, stop_buffer=stop_buffer,
             breakeven_at=trailing.get('breakeven_at', 0.5),
             trailing_activate=trailing.get('trail_activate', 1.0),
-            trailing_step=trailing.get('trail_step', 0.5))
+            trailing_step=trailing.get('trail_step', 0.5),
+            max_leverage=max_leverage, dynamic_risk=dynamic_risk,
+            cooldown_hours=cooldown_hours,
+            max_daily_loss_pct=max_daily_loss_pct,
+            max_daily_trades=max_daily_trades)
         
         return {'pf': metrics['profit_factor'], 'wr': metrics['win_rate'],
                 'ret': metrics['total_return'], 'dd': metrics['max_drawdown'],
@@ -170,13 +181,13 @@ class AutoOptimizer:
         self.config = config
         self.redis = redis_store
         opt_cfg = config.get('optimizer', {})
-        self.trigger_days = opt_cfg.get('trigger_days', 30)
-        self.trigger_trades = opt_cfg.get('trigger_trades', 20)
+        self.trigger_days = opt_cfg.get('trigger_days', 90)
+        self.trigger_trades = opt_cfg.get('trigger_trades', 15)
         self.trigger_pf_drop = opt_cfg.get('trigger_pf_drop', 1.2)
         self.trigger_dd_daily = 0.05  # 5% daily DD → force optimize
         self.min_improvement = opt_cfg.get('min_improvement', 0.10)
         self.max_param_delta = 0.5
-        self.cooldown_days = 7
+        self.cooldown_trades = opt_cfg.get('cooldown_trades', 30)
         self.max_trade_drop = 0.50  # 50% trade drop is OK if PF improves
         
         # Load baseline config (iron — never auto-overwrite)
@@ -191,6 +202,7 @@ class AutoOptimizer:
         
         # State tracking
         self.last_optimize_time = {}  # symbol -> datetime
+        self.last_optimize_trades = {}  # symbol -> trade_count at last optimization
         self.log_path = Path(__file__).parent.parent / "logs" / "optimizer.log"
         self.log_path.parent.mkdir(exist_ok=True)
         
@@ -200,38 +212,69 @@ class AutoOptimizer:
     def should_optimize(self, symbol: str, trades_count: int, 
                        days_since_start: float, current_pf: float,
                        daily_dd: float = 0.0) -> bool:
-        """Check if optimization should trigger."""
+        """Check if optimization should trigger.
+        
+        Logic:
+        1. Force: daily DD > 5% → optimize immediately
+        2. Cooldown: < 30 trades since last optimization → skip
+        3. Main: >= 15 trades AND PF < 1.2 → optimize
+        4. Safety: >= 90 days → optimize (max interval)
+        """
         
         # Force trigger: daily DD > 5%
         if daily_dd > self.trigger_dd_daily:
             logger.info(f"FORCE OPTIMIZE: {symbol} — daily DD={daily_dd:.1%} > {self.trigger_dd_daily:.1%}")
             return True
         
-        # Cooldown check
-        last_opt = self.last_optimize_time.get(symbol)
-        if last_opt and (datetime.utcnow() - last_opt).days < self.cooldown_days:
+        # PF drop trigger: bypass cooldown (emergency re-optimize)
+        if trades_count >= self.trigger_trades and current_pf < self.trigger_pf_drop:
+            logger.info(f"PF DROP OPTIMIZE: {symbol} — PF={current_pf:.2f} < {self.trigger_pf_drop}, "
+                        f"bypassing cooldown")
+            self.last_optimize_trades[symbol] = trades_count
+            return True
+        
+        # Cooldown check (trade-based)
+        last_trades = self.last_optimize_trades.get(symbol, 0)
+        trades_since = trades_count - last_trades
+        if trades_since < self.cooldown_trades:
             return False
         
-        # Standard triggers
-        if trades_count < self.trigger_trades:
-            return False
-        if days_since_start < self.trigger_days:
-            return False
-        if current_pf >= self.trigger_pf_drop:
-            return False
+        # Main trigger: enough trades (after cooldown)
+        if trades_count >= self.trigger_trades:
+            logger.info(f"OPTIMIZE TRIGGER: {symbol} — {trades_count} trades, "
+                        f"cooldown passed")
+            self.last_optimize_trades[symbol] = trades_count
+            return True
         
-        logger.info(f"OPTIMIZE TRIGGER: {symbol} — {trades_count} trades, "
-                    f"{days_since_start:.0f} days, PF={current_pf:.2f} < {self.trigger_pf_drop}")
-        return True
+        # Safety trigger: max interval (90 days)
+        if days_since_start >= self.trigger_days:
+            logger.info(f"OPTIMIZE TRIGGER: {symbol} — {days_since_start:.0f} days >= {self.trigger_days} (max interval)")
+            self.last_optimize_trades[symbol] = trades_count
+            return True
+        
+        return False
     
     def optimize(self, symbol: str, df: pd.DataFrame, 
                 current_params: dict, current_filters: dict,
-                current_trailing: dict) -> Optional[dict]:
+                current_trailing: dict,
+                risk_config: dict = None) -> Optional[dict]:
         """
         Run optimization for a symbol.
         Returns new config dict if better, None otherwise.
         """
         logger.info(f"OPTIMIZING {symbol} — testing param space")
+        
+        risk_config = risk_config or {}
+        bt_kwargs = dict(
+            commission=risk_config.get('commission', 0.001),
+            slippage=risk_config.get('slippage', 0.0005),
+            stop_buffer=risk_config.get('stop_buffer', 0.002),
+            max_leverage=risk_config.get('max_leverage', 10.0),
+            dynamic_risk=self.config.get('dynamic_risk'),
+            cooldown_hours=4.0,
+            max_daily_loss_pct=risk_config.get('max_daily_loss', 5.0),
+            max_daily_trades=risk_config.get('max_daily_trades', 20),
+        )
         
         # Test strategy params
         combos = generate_param_combos(PARAM_RANGES, max_combos=40)
@@ -242,7 +285,8 @@ class AutoOptimizer:
         
         for combo in combos:
             test_params = {**current_params, **combo}
-            result = run_walk_forward(df, test_params, current_filters, current_trailing)
+            result = run_walk_forward(df, test_params, current_filters, current_trailing,
+                                      **bt_kwargs)
             if result is None:
                 continue
             
@@ -266,7 +310,8 @@ class AutoOptimizer:
         for tc in generate_param_combos(TRAILING_RANGES, max_combos=15):
             test_trailing = {**current_trailing, **tc}
             test_params = {**current_params, **best_strategy}
-            result = run_walk_forward(df, test_params, current_filters, test_trailing)
+            result = run_walk_forward(df, test_params, current_filters, test_trailing,
+                                      **bt_kwargs)
             if result and result['avg_pf'] > best_overall_pf and result['min_pf'] >= 1.0:
                 best_overall_pf = result['avg_pf']
                 best_trailing = test_trailing

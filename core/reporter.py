@@ -61,16 +61,16 @@ class Reporter:
         return wins / len(recent)
 
     def _avg_r(self, trades: list, n: int = 30) -> Optional[float]:
-        """Average R-multiple (pnl / risk_unit approximation)."""
+        """Average R-multiple (pnl / risk_unit). Risk = entry to original stop."""
         recent = trades[-n:] if len(trades) >= n else trades
         if not recent:
             return None
         rs = []
         for t in recent:
             entry = t.get('entry', 0)
-            exit_p = t.get('exit_price', 0)
-            if entry > 0 and exit_p > 0 and t.get('pnl', 0) != 0:
-                risk = abs(entry - exit_p)
+            stop = t.get('stop_price', 0)
+            if entry > 0 and stop > 0 and t.get('pnl', 0) != 0:
+                risk = abs(entry - stop)
                 if risk > 0:
                     rs.append(t['pnl'] / risk)
         return sum(rs) / len(rs) if rs else None

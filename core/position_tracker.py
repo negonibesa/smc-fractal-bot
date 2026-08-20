@@ -307,6 +307,7 @@ class PositionTracker:
                 'pnl': pnl,
                 'close_time': time.time(),
                 'max_pnl_risk': pos.highest_pnl_risk,
+                'stop_price': pos.original_stop,
             }
             self.closed_trades.append(trade)
             self._save_trade(trade)

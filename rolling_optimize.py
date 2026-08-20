@@ -323,7 +323,7 @@ def main():
     exchange = ccxt.bybit({'enableRateLimit': True})
 
     # Run for 6 best pairs from bulk backtest
-    target_pairs = ['BNBUSDT', 'ETHUSDT', 'DOGEUSDT', 'XRPUSDT', 'DOTUSDT', 'RENDERUSDT']
+    target_pairs = ['BNBUSDT', 'ETHUSDT', 'DOGEUSDT', 'DOTUSDT']
     assets = [a for a in config.get('assets', [])
               if a.get('enabled', True) and a['symbol'] in target_pairs]
 

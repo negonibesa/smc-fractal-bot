@@ -38,7 +38,8 @@ class RiskManager:
                  dd_threshold_1: float = 6.0,
                  dd_threshold_2: float = 10.0,
                  pf_hot: float = 2.0,
-                 pf_window: int = 20):
+                 pf_window: int = 20,
+                 max_leverage: int = 10):
         """
         Args:
             dynamic_risk_enabled: Включить auto-risk adjustment
@@ -67,6 +68,8 @@ class RiskManager:
         self.slippage = slippage
         self.stop_buffer = stop_buffer
         self.redis = redis_store
+        self.max_leverage = max_leverage
+        self.current_equity = 0.0  # actual current equity
         
         # Состояние
         self.initial_equity = 0
@@ -134,6 +137,7 @@ class RiskManager:
             self.initial_equity = equity
         
         self.peak_equity = max(self.peak_equity, equity)
+        self.current_equity = equity  # track actual equity
         
         # Сброс дневной статистики
         today = time.strftime("%Y-%m-%d")
@@ -206,6 +210,14 @@ class RiskManager:
         net_risk = risk_amount - commission_cost * 0.1  # небольшой запас
         
         size = net_risk / stop_distance
+        
+        # Cap by max_leverage
+        if self.max_leverage > 0 and equity > 0:
+            max_notional = equity * self.max_leverage
+            max_size_by_lev = max_notional / entry if entry > 0 else 0
+            if size > max_size_by_lev:
+                logger.warning(f"Position size capped by leverage: {size:.4f} → {max_size_by_lev:.4f}")
+                size = max_size_by_lev
         
         # Округляем вниз до qty_step
         if qty_step > 0:
@@ -310,9 +322,11 @@ class RiskManager:
         self._save_to_redis()
     
     def _current_equity(self) -> float:
-        """Текущая equity (из последней сделки или initial)."""
+        """Текущая equity."""
+        if self.current_equity > 0:
+            return self.current_equity
         if self.recent_trades:
-            return self.peak_equity  # approximation
+            return self.peak_equity
         return self.initial_equity
     
     def _pause(self, reason: str):

@@ -276,6 +276,12 @@ class TrailingManager:
                 new_stop = min(new_stop, trail_stop)
         
         if new_stop != old_stop:
+            # Only update if moved significantly (> 5% of trail distance)
+            trail_dist = risk_unit * self.trail_step if self.trail_step > 0 else 0
+            min_movement = trail_dist * 0.05 if trail_dist > 0 else (pos.entry_price * 0.001 if pos.entry_price > 0 else 0)
+            if abs(new_stop - old_stop) < min_movement:
+                return  # too small, skip API call
+            
             # Update exchange FIRST, only update tracker on success
             result = self.executor.update_stop_loss(symbol, new_stop)
             if result.success:
@@ -367,17 +373,39 @@ class SMCFractalBot:
         self.optimizer = AutoOptimizer(config, redis_store=self.redis)
         self.start_time = datetime.utcnow()
         self.start_equity = 0.0  # set on first run loop
-        # Restore start_equity from Redis
+        # Restore start_equity and start_time from Redis
         try:
             meta = self.redis.load_meta() if self.redis else None
             logger.info(f"LOAD META: {meta}")
             if meta and 'start_equity' in meta and meta['start_equity'] > 0:
                 self.start_equity = meta['start_equity']
                 logger.info(f"RESTORE start_equity: ${self.start_equity:,.2f}")
+            if meta and 'start_time' in meta:
+                try:
+                    saved_start = datetime.fromisoformat(meta['start_time'])
+                    self.start_time = saved_start
+                    logger.info(f"RESTORE start_time: {self.start_time.isoformat()}")
+                except Exception:
+                    pass
         except Exception as e:
             logger.warning(f"Failed to restore start_equity: {e}")
         self.last_optimize_check = {}
         self.last_trade_close = {}  # symbol → timestamp of last trade close (cooldown)
+        
+        # Restore cooldown timestamps from Redis
+        if self.redis:
+            try:
+                meta = self.redis.load_meta()
+                if meta and 'last_trade_close' in meta:
+                    saved_close = meta['last_trade_close']
+                    now = time.time()
+                    for sym, ts in saved_close.items():
+                        # Only restore if within cooldown window (4H)
+                        if now - ts < 4 * 3600:
+                            self.last_trade_close[sym] = ts
+                            logger.info(f"RESTORE COOLDOWN: {sym} — {int((4*3600 - (now-ts))/60)}min left")
+            except Exception as e:
+                logger.warning(f"Failed to restore cooldown: {e}")
         
         # Reporter (daily/weekly reports)
         self.reporter = Reporter(redis_store=self.redis, notifier=self.notifier)
@@ -440,7 +468,13 @@ class SMCFractalBot:
         for symbol in self.symbols:
             state = self.redis.load_signal_state(symbol)
             if state:
-                # Restore last sweep info to avoid re-triggering
+                gen = self.signal_gens.get(symbol)
+                if gen:
+                    gen.state = state.get('state', 0)
+                    gen.sweep_direction = state.get('sweep_direction')
+                    gen.sweep_price = state.get('sweep_price')
+                    gen.sweep_index = state.get('sweep_index')
+                    gen.center_at_sweep = state.get('center_at_sweep')
                 logger.info(f"RESTORE SIGNAL STATE: {symbol} state={state.get('state', 0)}")
     
     def _save_signal_state(self, symbol: str):
@@ -590,6 +624,14 @@ class SMCFractalBot:
                 self.risk.register_trade(exit_result['pnl'])
                 self.executor.close_position(symbol)
                 self.last_trade_close[symbol] = time.time()
+                # Persist cooldown to Redis
+                if self.redis:
+                    try:
+                        meta = self.redis.load_meta() or {}
+                        meta['last_trade_close'] = self.last_trade_close
+                        self.redis.save_meta(meta)
+                    except Exception:
+                        pass
                 self.notifier.send_exit(
                     symbol, exit_result['side'], exit_result['entry_price'],
                     exit_result['exit_price'], exit_result['pnl'], exit_result['exit_reason']
@@ -850,12 +892,20 @@ class SMCFractalBot:
                                 # Apply new config
                                 self.symbol_configs[symbol]['strategy'].update(result['strategy'])
                                 self.symbol_configs[symbol]['trailing'].update(result['trailing'])
-                                # Rebuild signal generator
+                                # Rebuild signal generator, preserving state
+                                old_gen = self.signal_gens.get(symbol)
                                 sym_config = {
                                     'strategy': self._get_symbol_strategy(symbol),
                                     'filters': self._get_symbol_filters(symbol),
                                 }
-                                self.signal_gens[symbol] = SignalGenerator(sym_config)
+                                new_gen = SignalGenerator(sym_config)
+                                if old_gen:
+                                    new_gen.state = old_gen.state
+                                    new_gen.sweep_direction = old_gen.sweep_direction
+                                    new_gen.sweep_price = old_gen.sweep_price
+                                    new_gen.sweep_index = old_gen.sweep_index
+                                    new_gen.center_at_sweep = old_gen.center_at_sweep
+                                self.signal_gens[symbol] = new_gen
                                 
                                 # Log for weekly report
                                 self.reporter.log_optimization(symbol, current_params, result['strategy'])

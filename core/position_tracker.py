@@ -205,7 +205,7 @@ class PositionTracker:
                 be_stop = pos.entry_price + pos.entry_price * 0.0005  # commission
                 new_stop = max(new_stop, be_stop)
             else:
-                be_stop = pos.entry_price + pos.entry_price * 0.0005
+                be_stop = pos.entry_price - pos.entry_price * 0.0005  # SHORT: move stop DOWN
                 new_stop = min(new_stop, be_stop)
         
         # Trailing

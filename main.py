@@ -358,14 +358,15 @@ class SMCFractalBot:
         self.client = BybitClient(api_key, api_secret, testnet=testnet, demo=demo)
         self.risk = RiskManager(
             risk_percent=config['risk']['risk_percent'],
-            max_drawdown=10.0,
-            max_daily_loss=5.0,
-            max_consecutive_losses=3,
-            max_daily_trades=20,
+            max_drawdown=config.get('risk', {}).get('max_drawdown', 10.0),
+            max_daily_loss=config.get('risk', {}).get('max_daily_loss', 5.0),
+            max_consecutive_losses=config.get('risk', {}).get('max_consecutive_losses', 3),
+            max_daily_trades=config.get('risk', {}).get('max_daily_trades', 20),
             commission=config['risk']['commission'],
             slippage=config['risk']['slippage'],
             stop_buffer=config['risk']['stop_buffer'],
             redis_store=self.redis,
+            max_leverage=config.get('risk', {}).get('max_leverage', 10),
             dynamic_risk_enabled=config.get('dynamic_risk', {}).get('enabled', True),
             base_risk=config.get('dynamic_risk', {}).get('base_risk', 1.5),
             min_risk=config.get('dynamic_risk', {}).get('min_risk', 0.75),
@@ -598,9 +599,56 @@ class SMCFractalBot:
                 logger.info(f"SYNC: {side} {size} {symbol} @ {entry}")
         
         elif not pos and tracker_pos:
-            # Есть в tracker, нет на бирже — закрыли вручную
-            self.tracker.close_position(symbol)
-            logger.info(f"SYNC: Position {symbol} closed externally")
+            # Есть в tracker, нет на бирже — закрыто биржей (SL/TP) или вручную
+            # Подтягиваем реальный PnL из trade history
+            real_pnl = 0.0
+            exit_price = tracker_pos.entry_price
+            exit_reason = "EXTERNAL_CLOSE"
+            try:
+                trades = self.client.get_trade_history(symbol, limit=5)
+                for t in trades:
+                    t_side = t.get('side', '')
+                    t_qty = float(t.get('execQty', 0))
+                    t_price = float(t.get('execPrice', 0))
+                    t_pnl = float(t.get('closedPnl', 0))
+                    t_time = int(t.get('execTime', 0)) / 1000  # ms → sec
+                    
+                    # Match: recent trade with opposite side = our close
+                    if t_time > tracker_pos.entry_time and t_qty > 0:
+                        exit_price = t_price
+                        real_pnl = t_pnl
+                        if t_pnl < 0:
+                            exit_reason = "STOP_LOSS"
+                        elif t_pnl > 0:
+                            exit_reason = "TAKE_PROFIT"
+                        break
+            except Exception as e:
+                logger.warning(f"Failed to get trade history for {symbol}: {e}")
+                # Fallback: estimate from tracker
+                exit_price = tracker_pos.stop_price
+                real_pnl = tracker_pos.unrealized_pnl(exit_price)
+                exit_reason = "SYNC_ESTIMATE"
+            
+            # Register PnL with risk manager
+            self.risk.register_trade(real_pnl)
+            
+            # Close in tracker with real data
+            self.tracker.close_position(
+                symbol, pnl=real_pnl, exit_price=exit_price,
+                exit_reason=exit_reason, size=tracker_pos.size
+            )
+            
+            # Cooldown
+            self.last_trade_close[symbol] = time.time()
+            
+            # Notify
+            self.notifier.send_exit(
+                symbol, tracker_pos.side, tracker_pos.entry_price,
+                exit_price, real_pnl, exit_reason, size=tracker_pos.size
+            )
+            
+            logger.info(f"SYNC CLOSE: {symbol} {exit_reason} PnL={real_pnl:.2f} "
+                        f"(entry={tracker_pos.entry_price:.2f} exit={exit_price:.2f})")
     
     def run_cycle(self, symbol: str):
         """Один цикл обработки для символа."""
@@ -696,7 +744,8 @@ class SMCFractalBot:
                         pass
                 self.notifier.send_exit(
                     symbol, exit_result['side'], exit_result['entry_price'],
-                    exit_result['exit_price'], exit_result['pnl'], exit_result['exit_reason']
+                    exit_result['exit_price'], exit_result['pnl'], exit_result['exit_reason'],
+                    size=exit_result.get('size', 0)
                 )
         
         # 4. Проверить can_trade

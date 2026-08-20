@@ -298,8 +298,12 @@ class AutoOptimizer:
                 best_trailing = test_trailing
                 best_result = result
         
-        # Guard rails
-        baseline_params = self.baseline.get('assets', [{}])[0].get('config', {}).get('strategy', BASELINE_PARAMS)
+        # Guard rails — find baseline for this specific symbol
+        baseline_params = BASELINE_PARAMS  # fallback
+        for asset in self.baseline.get('assets', []):
+            if asset.get('symbol') == symbol:
+                baseline_params = asset.get('config', {}).get('strategy', BASELINE_PARAMS)
+                break
         delta = param_delta(best_strategy, baseline_params)
         
         if delta > self.max_param_delta:
@@ -341,16 +345,20 @@ class AutoOptimizer:
         return {**base_params, **overrides}
     
     def _get_current_pf(self, symbol: str) -> float:
-        """Get current PF from Redis."""
+        """Get current PF from closed trades in Redis."""
         if self.redis:
             try:
-                state = self.redis.load_risk_state()
-                if state:
-                    wins = state.get('total_wins', 0)
-                    losses = state.get('total_losses', 0)
-                    if losses > 0:
-                        return wins / losses
-            except:
+                trades = self.redis.load_closed_trades()
+                if trades:
+                    # Filter by symbol if specified
+                    sym_trades = [t for t in trades if t.get('symbol') == symbol] if symbol else trades
+                    if len(sym_trades) < 2:
+                        return 1.5
+                    gross_profit = sum(t.get('pnl', 0) for t in sym_trades if t.get('pnl', 0) > 0)
+                    gross_loss = abs(sum(t.get('pnl', 0) for t in sym_trades if t.get('pnl', 0) <= 0))
+                    if gross_loss > 0:
+                        return gross_profit / gross_loss
+            except Exception:
                 pass
         return 1.5
     

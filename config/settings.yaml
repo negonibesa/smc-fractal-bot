@@ -22,6 +22,11 @@ risk:
   commission: 0.001
   slippage: 0.0005
   stop_buffer: 0.002
+  max_drawdown: 10.0
+  max_daily_loss: 5.0
+  max_consecutive_losses: 3
+  max_daily_trades: 20
+  max_leverage: 10
 
 # ─── DYNAMIC RISK (DD + PF) ────────────────────────────────
 dynamic_risk:

@@ -6,10 +6,13 @@ import time
 import hmac
 import hashlib
 import json
+import logging
 import requests
 import threading
 from typing import Optional, Dict, Any
 from urllib.parse import urlencode
+
+logger = logging.getLogger(__name__)
 
 
 class BybitClient:

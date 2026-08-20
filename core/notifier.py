@@ -79,10 +79,15 @@ class TelegramNotifier:
         return self._send(text)
     
     def send_exit(self, symbol: str, direction: str, entry: float,
-                  exit_price: float, pnl: float, reason: str):
+                  exit_price: float, pnl: float, reason: str,
+                  size: float = 0):
         """Уведомление о выходе."""
         emoji = "💰" if pnl > 0 else "💸"
-        pnl_pct = (pnl / (entry * 0.01)) if entry > 0 else 0
+        # Correct PnL %: pnl / notional_value * 100
+        if size > 0 and entry > 0:
+            pnl_pct = pnl / (entry * size) * 100
+        else:
+            pnl_pct = 0
         
         text = (
             f"{emoji} <b>EXIT — {symbol}</b>\n"

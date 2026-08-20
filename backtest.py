@@ -25,6 +25,7 @@ def run_backtest(
     cooldown_hours: float = 4.0,
     max_daily_loss_pct: float = 5.0,
     max_daily_trades: int = 20,
+    max_consecutive_losses: int = 3,
     funding_rates: pd.DataFrame = None,
 ) -> Tuple[List[dict], dict]:
     """
@@ -56,6 +57,7 @@ def run_backtest(
     current_day = None
     funding_accrued = 0.0
     total_funding = 0.0
+    consecutive_losses = 0
 
     # Dynamic risk params
     dr_base = dynamic_risk.get('base_risk', 1.5) if dynamic_risk else risk_percent
@@ -88,7 +90,7 @@ def run_backtest(
     def _close_position(exit_p, reason, current_time):
         nonlocal position, entry_price, stop_price, tp_price, direction
         nonlocal original_stop, highest_pnl, balance, equity, margin_used, peak_equity
-        nonlocal daily_pnl, daily_trades, funding_accrued
+        nonlocal daily_pnl, daily_trades, funding_accrued, consecutive_losses
 
         if direction == 'LONG':
             raw_pnl = position * (exit_p - entry_price)
@@ -107,6 +109,11 @@ def run_backtest(
             'pnl': pnl, 'direction': direction, 'exit_reason': reason,
             'risk_units': highest_pnl, 'stop_price': original_stop,
         })
+
+        if pnl < 0:
+            consecutive_losses += 1
+        else:
+            consecutive_losses = 0
 
         position = 0
         funding_accrued = 0.0
@@ -168,22 +175,22 @@ def run_backtest(
 
             if breakeven_at > 0 and highest_pnl >= breakeven_at:
                 if direction == 'LONG':
-                    new_stop = entry_price + entry_price * commission
+                    new_stop = entry_price + entry_price * 0.0005
                     if new_stop > stop_price:
                         stop_price = new_stop
                 else:
-                    new_stop = entry_price - entry_price * commission
+                    new_stop = entry_price - entry_price * 0.0005
                     if new_stop < stop_price:
                         stop_price = new_stop
 
             if trailing_activate > 0 and trailing_step > 0 and highest_pnl >= trailing_activate:
                 trail_distance = risk_unit * trailing_step
                 if direction == 'LONG':
-                    new_stop = high - trail_distance
+                    new_stop = current_price - trail_distance
                     if new_stop > stop_price:
                         stop_price = new_stop
                 else:
-                    new_stop = low + trail_distance
+                    new_stop = current_price + trail_distance
                     if new_stop < stop_price:
                         stop_price = new_stop
 
@@ -219,6 +226,8 @@ def run_backtest(
             if daily_trades >= max_daily_trades:
                 continue
             if daily_pnl < 0 and equity > 0 and abs(daily_pnl) / equity * 100 >= max_daily_loss_pct:
+                continue
+            if consecutive_losses >= max_consecutive_losses:
                 continue
 
             # Cooldown

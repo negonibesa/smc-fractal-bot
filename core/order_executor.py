@@ -3,6 +3,7 @@ Order Executor —выполнение ордеров: вход, выход, с�
 """
 
 import logging
+import time as _time
 from typing import Optional, Dict, Tuple
 from dataclasses import dataclass, field
 
@@ -116,7 +117,6 @@ class OrderExecutor:
             order_id = result.get('orderId', '')
 
             # 4b. Verify fill status (detect stuck orders)
-            import time as _time
             for _attempt in range(5):
                 try:
                     orders = self.client.get_open_orders(symbol)
@@ -218,7 +218,7 @@ class OrderExecutor:
             logger.error(f"Conditional TP failed: {e}")
     
     def close_position(self, symbol: str, side: Optional[str] = None) -> OrderResult:
-        """Закрыть текущую позицию маркет-ордером."""
+        """Закрыть текущую позицию маркет-ордером с проверкой исполнения."""
         try:
             pos = self.client.get_position(symbol)
             if not pos:
@@ -228,7 +228,6 @@ class OrderExecutor:
             size = pos.get('size', '0')
             inst = self._get_instrument(symbol)
             
-            # Если side не указан — закрываем противоположным
             if side is None:
                 close_side = "Sell" if pos_side == "Buy" else "Buy"
             else:
@@ -241,9 +240,22 @@ class OrderExecutor:
                 symbol, close_side, qty_str, reduce_only=True
             )
             
-            # Удаляем conditional ордера
-            self._cancel_conditional_orders(symbol)
+            # Verify execution: poll position status
+            closed_ok = False
+            for attempt in range(3):
+                _time.sleep(1)
+                check_pos = self.client.get_position(symbol)
+                check_size = float(check_pos.get('size', 0)) if check_pos else 0
+                if check_size == 0:
+                    closed_ok = True
+                    break
+                logger.warning(f"Close verify {attempt+1}: {symbol} still has size={check_size}")
             
+            if not closed_ok:
+                logger.error(f"Close NOT verified: {symbol} may still be open!")
+                return OrderResult(False, message="Close not verified - position may still be open")
+            
+            self._cancel_conditional_orders(symbol)
             return OrderResult(True, order_id=result.get('orderId', ''), message="Closed")
         
         except Exception as e:

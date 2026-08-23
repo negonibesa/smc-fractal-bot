@@ -64,7 +64,7 @@ class BybitClient:
             sign_str.encode(),
             hashlib.sha256
         ).hexdigest()
-    
+
     def _request(self, method: str, endpoint: str, params: Optional[Dict] = None,
                  signed: bool = False) -> Dict:
         """Make API request (thread-safe with 429 retry)."""
@@ -73,6 +73,7 @@ class BybitClient:
                 url = f"{self.BASE_URL}{endpoint}"
                 
                 if signed:
+                    self._time_offset = self._sync_time()
                     timestamp = int(time.time() * 1000) + self._time_offset
                     params = params or {}
                     params["timestamp"] = timestamp

@@ -139,6 +139,7 @@ def run_backtest(
             current_day = day
             daily_pnl = 0.0
             daily_trades = 0
+            consecutive_losses = 0
 
         # ─── Funding rate deduction ────────────────────────────────
         if position != 0 and funding_rates is not None and len(funding_rates) > 0:
@@ -227,7 +228,7 @@ def run_backtest(
                 continue
             if daily_pnl < 0 and equity > 0 and abs(daily_pnl) / equity * 100 >= max_daily_loss_pct:
                 continue
-            if consecutive_losses >= max_consecutive_losses:
+            if max_consecutive_losses > 0 and consecutive_losses >= max_consecutive_losses:
                 continue
 
             # Cooldown

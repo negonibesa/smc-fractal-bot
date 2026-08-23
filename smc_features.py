@@ -12,13 +12,88 @@ def detect_doji(df, body_threshold=0.2, shadow_multiplier=1.5):
     is_doji = (body / high_low < body_threshold) & (upper_shadow > body * shadow_multiplier) & (lower_shadow > body * shadow_multiplier)
     return is_doji.fillna(False).astype(bool)
 
-def find_consolidation_center(df, lookback=20):
-    """Находит центр консолидации."""
+def find_consolidation_center(df, lookback=20, use_body=False):
+    """Находит центр консолидации.
+    
+    use_body=True: используем (open+close)/2 — фитили это манипуляции
+    use_body=False: (high+low)/2 — H/L center (default, проверено A/B тестом)
+    """
     df = df.copy().reset_index(drop=True)
-    rolling_high = df['high'].rolling(lookback).max()
-    rolling_low = df['low'].rolling(lookback).min()
+    if use_body:
+        # Используем тело свечи — реальная битва быков/медведей
+        body_center = (df['open'] + df['close']) / 2
+        rolling_high = body_center.rolling(lookback).max()
+        rolling_low = body_center.rolling(lookback).min()
+    else:
+        rolling_high = df['high'].rolling(lookback).max()
+        rolling_low = df['low'].rolling(lookback).min()
     center = (rolling_high + rolling_low) / 2
     return center
+
+def find_pivot_candle(df, start_idx, direction='LONG', lookback=50):
+    """Находит последний фрактал (pivot) перед свипом.
+    
+    Для LONG: ищем pivot high (зелёная свеча) — последний пик перед падением
+    Для SHORT: ищем pivot low (красная свеча) — последняя впадина перед ростом
+    
+    Фрактал: свеча, у которой high[i] > high[i-1..i-k] и high[i] > high[i+1..i+k]
+    (или зеркально для low)
+    
+    Возвращает: (idx, body_center) или (None, None)
+    """
+    df = df.copy().reset_index(drop=True)
+    k = 2  # стандартный фрактал — 2 свечи с каждой стороны
+    
+    search_start = max(0, start_idx - lookback)
+    
+    for i in range(start_idx - 1, search_start, -1):
+        if i < k or i >= len(df) - k:
+            continue
+        
+        if direction == 'LONG':
+            # Ищем pivot high — высшая точка перед падением
+            high_i = df['high'].iloc[i]
+            is_pivot_high = True
+            for j in range(1, k + 1):
+                if df['high'].iloc[i - j] >= high_i or df['high'].iloc[i + j] >= high_i:
+                    is_pivot_high = False
+                    break
+            
+            if is_pivot_high:
+                # Проверяем что свеча зелёная (close > open)
+                if df['close'].iloc[i] > df['open'].iloc[i]:
+                    body_center = (df['open'].iloc[i] + df['close'].iloc[i]) / 2
+                    return i, body_center
+        
+        else:  # SHORT
+            # Ищем pivot low — низшая точка перед ростом
+            low_i = df['low'].iloc[i]
+            is_pivot_low = True
+            for j in range(1, k + 1):
+                if df['low'].iloc[i - j] <= low_i or df['low'].iloc[i + j] <= low_i:
+                    is_pivot_low = False
+                    break
+            
+            if is_pivot_low:
+                # Проверяем что свеча красная (close < open)
+                if df['close'].iloc[i] < df['open'].iloc[i]:
+                    body_center = (df['open'].iloc[i] + df['close'].iloc[i]) / 2
+                    return i, body_center
+    
+    return None, None
+
+
+def find_structure_tp(df, signal_idx, direction, lookback=50):
+    """Находит TP на основе структуры — предыдущий фрактал.
+    
+    Для LONG: TP = центр тела последней зелёной свечи перед падением
+    Для SHORT: TP = центр тела последней красной свечи перед ростом
+    
+    Если фрактал не найден — возвращает None (используем fallback на R-множитель)
+    """
+    _, body_center = find_pivot_candle(df, signal_idx, direction, lookback)
+    return body_center
+
 
 def detect_sweep(df, center, threshold=0.005):
     """Детектирует свип (увеличенный порог)."""

@@ -8,6 +8,8 @@ strategy:
   center_proximity: 0.012
   tp_multiplier: 1.0
   timeout: 15
+  tp_mode: 'structure'  # 'r_multiple' или 'structure'
+  structure_tp_lookback: 50
 
 # ─── TRAILING STOP ──────────────────────────────────────────
 trailing:
@@ -100,7 +102,7 @@ assets:
         trail_step: 0.3
 
   - symbol: BNBUSDT
-    enabled: true
+    enabled: false
     # BNB rolling WF: AVG PF=1.81, MIN PF=1.39
     config:
       strategy:
@@ -120,7 +122,7 @@ assets:
         trail_step: 0.3
 
   - symbol: DOGEUSDT
-    enabled: true
+    enabled: false
     # DOGE rolling WF: AVG PF=2.74, MIN PF=1.79 — best performer
     config:
       strategy:
@@ -140,7 +142,7 @@ assets:
         trail_step: 0.3
 
   - symbol: DOTUSDT
-    enabled: true
+    enabled: false
     # DOT rolling WF: AVG PF=2.32, MIN PF=1.54
     config:
       strategy:
@@ -229,6 +231,63 @@ assets:
         adx_filter:
           enabled: true
           min_adx: 30
+      trailing:
+        enabled: true
+        breakeven_at: 0.3
+        trail_activate: 0.8
+        trail_step: 0.3
+
+  - symbol: GRAMUSDT
+    enabled: true
+    config:
+      strategy:
+        lookback: 12
+        sweep_threshold: 0.008
+        center_proximity: 0.012
+        tp_multiplier: 1.0
+        timeout: 15
+      filters:
+        adx_filter:
+          enabled: true
+          min_adx: 25
+      trailing:
+        enabled: true
+        breakeven_at: 0.3
+        trail_activate: 0.8
+        trail_step: 0.3
+
+  - symbol: SUIUSDT
+    enabled: false
+    config:
+      strategy:
+        lookback: 12
+        sweep_threshold: 0.008
+        center_proximity: 0.012
+        tp_multiplier: 1.0
+        timeout: 15
+      filters:
+        adx_filter:
+          enabled: true
+          min_adx: 25
+      trailing:
+        enabled: true
+        breakeven_at: 0.3
+        trail_activate: 0.8
+        trail_step: 0.3
+
+  - symbol: APTUSDT
+    enabled: false
+    config:
+      strategy:
+        lookback: 12
+        sweep_threshold: 0.008
+        center_proximity: 0.012
+        tp_multiplier: 1.0
+        timeout: 15
+      filters:
+        adx_filter:
+          enabled: true
+          min_adx: 25
       trailing:
         enabled: true
         breakeven_at: 0.3

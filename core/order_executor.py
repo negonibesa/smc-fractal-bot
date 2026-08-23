@@ -47,12 +47,13 @@ class OrderExecutor:
         return f"{price:.4f}".rstrip('0').rstrip('.')
     
     def _get_instrument(self, symbol: str) -> Dict:
-        """Получить параметры инструмента (min qty, step, tick)."""
+        """Получить параметры инструмента (min qty, max qty, step, tick)."""
         info = self.client.get_instruments(symbol)
         lot_filter = info.get('lotSizeFilter', {})
         price_filter = info.get('priceFilter', {})
         return {
             'min_qty': float(lot_filter.get('minOrderQty', 0.01)),
+            'max_qty': float(lot_filter.get('maxMktOrderQty', lot_filter.get('maxOrderQty', 999999))),
             'qty_step': float(lot_filter.get('qtyStep', 0.01)),
             'min_value': float(lot_filter.get('minNotionalValue', 5)),
             'tick_size': float(price_filter.get('tickSize', 0.01)),
@@ -107,6 +108,10 @@ class OrderExecutor:
             
             if size < inst['min_qty']:
                 return OrderResult(False, message=f"Size {size} < min {inst['min_qty']}")
+            
+            if size > inst['max_qty']:
+                logger.warning(f"Size {size} capped to max_qty {inst['max_qty']}")
+                size = inst['max_qty']
             
             # 3. Округлить
             qty_str = self._round_qty(size, inst['qty_step'])
@@ -184,7 +189,7 @@ class OrderExecutor:
                         break
                     except Exception as e3:
                         logger.error(f"Emergency close attempt {attempt+1} failed: {e3}")
-                        _time.sleep(1)
+                        _time.sleep(2 * (attempt + 1))
                 if not close_success:
                     logger.critical(f"EMERGENCY CLOSE FAILED AFTER 3 ATTEMPTS: {symbol} — NAKED POSITION!")
                     return OrderResult(False, order_id=order_id, message=f"Naked position! All close attempts failed", filled_qty=float(qty_str), sl_tp_ok=False)

@@ -27,6 +27,8 @@ PARAM_RANGES = {
     'center_proximity': [0.008, 0.010, 0.012, 0.015],
     'tp_multiplier': [1.0, 1.5, 2.0],
     'timeout': [6, 10, 15, 20],
+    'tp_mode': ['r_multiple', 'structure'],  # Новый параметр
+    'structure_tp_lookback': [30, 50, 70],  # Новый параметр
 }
 TRAILING_RANGES = {
     'breakeven_at': [0.3, 0.5, 0.7],
@@ -103,7 +105,7 @@ def fetch_funding_rates(exchange, symbol):
     return df
 
 
-def run_backtest_on_segment(df, params, trailing, risk_config, dynamic_risk, funding_rates=None, symbol='BACKTEST'):
+def run_backtest_on_segment(df, params, trailing, risk_config, dynamic_risk, funding_rates=None, symbol='BACKTEST', use_consecutive_losses=True):
     """Generate signals + backtest on a specific df segment."""
     sig_config = {'strategy': params, 'filters': {}}
     gen = SignalGenerator(sig_config, symbol=symbol)
@@ -137,6 +139,7 @@ def run_backtest_on_segment(df, params, trailing, risk_config, dynamic_risk, fun
         cooldown_hours=4.0,
         max_daily_loss_pct=risk_config.get('max_daily_loss', 5.0),
         max_daily_trades=risk_config.get('max_daily_trades', 20),
+        max_consecutive_losses=3 if use_consecutive_losses else 0,
         funding_rates=funding_rates,
     )
     return metrics, trades
@@ -172,7 +175,7 @@ def optimize_on_train(df_train, current_params, current_trailing, risk_config, d
             seg = df_train.iloc[seg_start:seg_end].copy().reset_index(drop=True)
             if len(seg) < 20:
                 continue
-            m, _ = run_backtest_on_segment(seg, test_params, current_trailing, risk_config, dynamic_risk, symbol=symbol)
+            m, _ = run_backtest_on_segment(seg, test_params, current_trailing, risk_config, dynamic_risk, symbol=symbol, use_consecutive_losses=False)
             if m and m['total_trades'] >= 2:
                 oos_results.append(m['profit_factor'])
         if not oos_results:
@@ -196,7 +199,7 @@ def optimize_on_train(df_train, current_params, current_trailing, risk_config, d
             seg = df_train.iloc[seg_start:seg_end].copy().reset_index(drop=True)
             if len(seg) < 20:
                 continue
-            m, _ = run_backtest_on_segment(seg, best_params, test_trailing, risk_config, dynamic_risk, symbol=symbol)
+            m, _ = run_backtest_on_segment(seg, best_params, test_trailing, risk_config, dynamic_risk, symbol=symbol, use_consecutive_losses=False)
             if m and m['total_trades'] >= 2:
                 oos_results.append(m['profit_factor'])
         if oos_results:

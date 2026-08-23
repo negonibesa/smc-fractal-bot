@@ -24,7 +24,7 @@ from core.auto_optimizer import AutoOptimizer
 from core.regime_detector import detect_regime, adapt_params_for_regime
 from core.reporter import Reporter
 from core.dashboard import Dashboard
-from smc_features import find_consolidation_center, detect_sweep, calculate_adx
+from smc_features import find_consolidation_center, detect_sweep, calculate_adx, find_structure_tp
 
 load_dotenv()
 
@@ -91,6 +91,8 @@ class SignalGenerator:
         self.center_proximity = config['strategy']['center_proximity']
         self.tp_multiplier = config['strategy']['tp_multiplier']
         self.timeout = config['strategy']['timeout']
+        self.tp_mode = config['strategy'].get('tp_mode', 'r_multiple')  # 'r_multiple' или 'structure'
+        self.structure_tp_lookback = config['strategy'].get('structure_tp_lookback', 50)
         self.adx_enabled = config.get('filters', {}).get('adx_filter', {}).get('enabled', False)
         self.adx_min = config.get('filters', {}).get('adx_filter', {}).get('min_adx', 25)
         self.session_enabled = config.get('filters', {}).get('session_filter', {}).get('enabled', False)
@@ -188,14 +190,58 @@ class SignalGenerator:
                 
                 if self.sweep_direction == 'bearish':
                     stop = self.sweep_price * 1.003
-                    risk = abs(entry - stop)
-                    tp = entry - risk * self.tp_multiplier
                     direction = 'SELL'
                 else:
                     stop = self.sweep_price * 0.997
-                    risk = abs(stop - entry)
-                    tp = entry + risk * self.tp_multiplier
                     direction = 'BUY'
+                
+                # Расчёт TP
+                if self.tp_mode == 'structure':
+                    # Структурный TP: предыдущий фрактал
+                    structure_tp = find_structure_tp(df, candle_index, direction, lookback=self.structure_tp_lookback)
+                    if structure_tp is not None:
+                        risk = abs(entry - stop)
+                        
+                        if direction == 'SELL':
+                            # Для SELL: TP должен быть ниже entry
+                            if structure_tp < entry:
+                                tp_distance = entry - structure_tp
+                                # Минимальная дистанция: 0.3R (чтобы не ставить TP слишком близко)
+                                # Максимальной НЕТ — структурный уровень может быть далеко
+                                # Это ключевое отличие от R-множителя: мы целимся в уровень, а не в абстрактное число
+                                min_tp_distance = risk * 0.3
+                                
+                                if tp_distance >= min_tp_distance:
+                                    tp = structure_tp
+                                else:
+                                    tp = entry - risk * self.tp_multiplier
+                            else:
+                                tp = entry - risk * self.tp_multiplier
+                        else:
+                            # Для BUY: TP должен быть выше entry
+                            if structure_tp > entry:
+                                tp_distance = structure_tp - entry
+                                min_tp_distance = risk * 0.3
+                                
+                                if tp_distance >= min_tp_distance:
+                                    tp = structure_tp
+                                else:
+                                    tp = entry + risk * self.tp_multiplier
+                            else:
+                                tp = entry + risk * self.tp_multiplier
+                    else:
+                        risk = abs(entry - stop)
+                        if direction == 'SELL':
+                            tp = entry - risk * self.tp_multiplier
+                        else:
+                            tp = entry + risk * self.tp_multiplier
+                else:
+                    # Старая логика: R-множитель
+                    risk = abs(entry - stop)
+                    if direction == 'SELL':
+                        tp = entry - risk * self.tp_multiplier
+                    else:
+                        tp = entry + risk * self.tp_multiplier
                 
                 # 1D trend filter: skip against daily trend
                 if self.trend_1d_enabled and self.daily_bullish is not None:
@@ -440,6 +486,12 @@ class SMCFractalBot:
         # Regime state per symbol
         self.regime_state = {}
         
+        # Ghost position tracking: sync failures → force-clear after N
+        self.sync_fail_count = {}  # symbol → consecutive failures
+        
+        # Signal dedup: track last signal candle index to avoid spam
+        self.last_signal_candle = {}  # symbol → candle_index
+        
         # Symbols — each with its own config
         self.symbols = []
         self.symbol_configs = {}
@@ -594,6 +646,7 @@ class SMCFractalBot:
                     tp=tp if tp else entry * (1.01 if side == "LONG" else 0.99)
                 )
                 logger.info(f"SYNC: {side} {size} {symbol} @ {entry}")
+                self.sync_fail_count[symbol] = 0
         
         elif not pos and tracker_pos:
             # Есть в tracker, нет на бирже — закрыто биржей (SL/TP) или вручную
@@ -619,12 +672,24 @@ class SMCFractalBot:
                         elif t_pnl > 0:
                             exit_reason = "TAKE_PROFIT"
                         break
+                
+                self.sync_fail_count[symbol] = 0
             except Exception as e:
                 logger.warning(f"Failed to get trade history for {symbol}: {e}")
-                # Fallback: estimate from tracker
-                exit_price = tracker_pos.stop_price
-                real_pnl = tracker_pos.unrealized_pnl(exit_price)
-                exit_reason = "SYNC_ESTIMATE"
+                fails = self.sync_fail_count.get(symbol, 0) + 1
+                self.sync_fail_count[symbol] = fails
+                
+                if fails >= 3:
+                    # 3+ consecutive failures — force-clear ghost position
+                    logger.error(f"GHOST CLEAR: {symbol} — {fails} failed sync attempts, force-closing tracker")
+                    self.tracker.close_position(
+                        symbol, pnl=0.0, exit_price=tracker_pos.entry_price,
+                        exit_reason="GHOST_CLEARED", size=tracker_pos.size
+                    )
+                    self.sync_fail_count[symbol] = 0
+                else:
+                    logger.info(f"SYNC SKIP: {symbol} — attempt {fails}/3, will retry next cycle")
+                return
             
             # Register PnL with risk manager
             self.risk.register_trade(real_pnl)
@@ -761,10 +826,17 @@ class SMCFractalBot:
             
             # Используем предпоследнюю свечу (текущая ещё не закрыта)
             candle_idx = len(df) - 2
+            
+            # Skip if we already generated a signal on this candle (prevent spam)
+            last_sig_candle = self.last_signal_candle.get(symbol, -1)
+            if candle_idx == last_sig_candle:
+                return
+            
             sig = sig_gen.process_candle(df, candle_idx)
             self._save_signal_state(symbol)
             
             if sig:
+                self.last_signal_candle[symbol] = candle_idx
                 direction = sig['direction']
                 entry = sig['entry']
                 stop = sig['stop']

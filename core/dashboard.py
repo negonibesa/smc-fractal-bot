@@ -6,14 +6,43 @@ Serves on port 80 inside the container.
 import os
 import json
 import time
+import hmac
+import base64
 import logging
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request, Response
 
 logger = logging.getLogger(__name__)
+
+
+def _auth_ok(auth_header: str) -> bool:
+    """Check HTTP Basic credentials against DASH_USER/DASH_PASS env vars."""
+    user = os.getenv("DASH_USER", "admin")
+    password = os.getenv("DASH_PASS", "")
+    if not password:
+        logger.warning("DASH_PASS not set — dashboard auth locked (401 for all)")
+        return False
+    if not auth_header or not auth_header.startswith("Basic "):
+        return False
+    try:
+        decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
+    except Exception:
+        return False
+    if ":" not in decoded:
+        return False
+    u, p = decoded.split(":", 1)
+    return hmac.compare_digest(u, user) and hmac.compare_digest(p, password)
+
+
+def _unauthorized_response() -> Response:
+    return Response(
+        "Unauthorized",
+        401,
+        {"WWW-Authenticate": 'Basic realm="SMC Bot Dashboard"'},
+    )
 
 DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -203,6 +232,11 @@ class Dashboard:
         self._setup_routes()
 
     def _setup_routes(self):
+        @self.app.before_request
+        def require_auth():
+            if not _auth_ok(request.headers.get("Authorization", "")):
+                return _unauthorized_response()
+
         @self.app.route("/")
         def index():
             return DASHBOARD_HTML
@@ -329,4 +363,5 @@ class Dashboard:
         logger.info(f"Dashboard started on http://0.0.0.0:{self.port}")
 
     def _run(self):
+        logging.getLogger("werkzeug").setLevel(logging.WARNING)
         self.app.run(host="0.0.0.0", port=self.port, debug=False, use_reloader=False)

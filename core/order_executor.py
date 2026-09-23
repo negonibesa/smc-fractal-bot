@@ -227,7 +227,8 @@ class OrderExecutor:
         try:
             pos = self.client.get_position(symbol)
             if not pos:
-                return OrderResult(False, message="No position")
+                logger.info(f"{symbol}: position already closed on exchange (nothing to close)")
+                return OrderResult(True, message="Already closed")
             
             pos_side = pos.get('side', '')
             size = pos.get('size', '0')
@@ -322,5 +323,9 @@ class OrderExecutor:
             logger.info(f"Leverage set to {leverage}x for {symbol}")
             return True
         except Exception as e:
+            # Bybit 110043 = "leverage not modified" — плечо уже стоит как нужно, это не ошибка
+            if "code=110043" in str(e):
+                logger.debug(f"Leverage already {leverage}x for {symbol}")
+                return True
             logger.error(f"Set leverage failed: {e}")
             return False

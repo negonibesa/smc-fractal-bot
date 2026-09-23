@@ -24,6 +24,7 @@ services:
         condition: service_healthy
     ports:
       - "80:80"
+      - "8081:80"
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379

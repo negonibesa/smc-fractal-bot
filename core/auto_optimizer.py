@@ -226,23 +226,16 @@ class AutoOptimizer:
             logger.info(f"FORCE OPTIMIZE: {symbol} — daily DD={daily_dd:.1%} > {self.trigger_dd_daily:.1%}")
             return True
         
-        # PF drop trigger: bypass cooldown (emergency re-optimize)
-        if trades_count >= self.trigger_trades and current_pf < self.trigger_pf_drop:
-            logger.info(f"PF DROP OPTIMIZE: {symbol} — PF={current_pf:.2f} < {self.trigger_pf_drop}, "
-                        f"bypassing cooldown")
-            self.last_optimize_trades[symbol] = trades_count
-            return True
-        
         # Cooldown check (trade-based)
         last_trades = self.last_optimize_trades.get(symbol, 0)
         trades_since = trades_count - last_trades
         if trades_since < self.cooldown_trades:
             return False
         
-        # Main trigger: enough trades (after cooldown)
-        if trades_count >= self.trigger_trades:
+        # Main trigger: enough trades AND low PF
+        if trades_count >= self.trigger_trades and current_pf < self.trigger_pf_drop:
             logger.info(f"OPTIMIZE TRIGGER: {symbol} — {trades_count} trades, "
-                        f"cooldown passed")
+                        f"PF={current_pf:.2f} < {self.trigger_pf_drop}")
             self.last_optimize_trades[symbol] = trades_count
             return True
         

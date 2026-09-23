@@ -24,6 +24,7 @@ class Position:
     highest_pnl_risk: float = 0.0
     original_stop: float = 0.0
     trailing_active: bool = False
+    strategy: str = 'smc'  # smc / zdev
     
     @property
     def risk_unit(self) -> float:
@@ -87,6 +88,7 @@ class PositionTracker:
                     highest_pnl_risk=p.get('highest_pnl_risk', 0.0),
                     original_stop=p.get('original_stop', p['stop_price']),
                     trailing_active=p.get('trailing_active', False),
+                    strategy=p.get('strategy', 'smc'),
                 )
                 self.positions[sym] = pos
                 logger.info(f"RESTORE POSITION: {pos.side} {pos.size} {sym} @ {pos.entry_price}")
@@ -117,6 +119,7 @@ class PositionTracker:
                 'highest_pnl_risk': pos.highest_pnl_risk,
                 'original_stop': pos.original_stop,
                 'trailing_active': pos.trailing_active,
+                'strategy': pos.strategy,
             })
         except Exception as e:
             logger.error(f"Redis save position failed: {e}")
@@ -140,7 +143,8 @@ class PositionTracker:
             logger.error(f"Redis save trade failed: {e}")
     
     def open_position(self, symbol: str, side: str, entry: float,
-                      size: float, stop: float, tp: float) -> Position:
+                      size: float, stop: float, tp: float,
+                      strategy: str = 'smc') -> Position:
         """Зарегистрировать открытие позиции."""
         pos = Position(
             symbol=symbol,
@@ -151,10 +155,11 @@ class PositionTracker:
             tp_price=tp,
             entry_time=time.time(),
             original_stop=stop,
+            strategy=strategy,
         )
         self.positions[symbol] = pos
         self._save_position(symbol, pos)
-        logger.info(f"TRACK OPEN: {side} {size} {symbol} @ {entry} SL={stop} TP={tp}")
+        logger.info(f"TRACK OPEN: {strategy} {side} {size} {symbol} @ {entry} SL={stop} TP={tp}")
         return pos
     
     def check_exits(self, symbol: str, high: float, low: float,
@@ -207,6 +212,7 @@ class PositionTracker:
                 'size': pos.size,
                 'pnl': pnl,
                 'exit_reason': exit_reason,
+                'strategy': pos.strategy,
                 'entry_time': pos.entry_time,
                 'exit_time': time.time(),
                 'max_pnl_risk': pos.highest_pnl_risk,
@@ -235,6 +241,7 @@ class PositionTracker:
                 'close_time': time.time(),
                 'max_pnl_risk': pos.highest_pnl_risk,
                 'stop_price': pos.original_stop,
+                'strategy': pos.strategy,
             }
             self.closed_trades.append(trade)
             self._save_trade(trade)

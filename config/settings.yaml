@@ -1,24 +1,16 @@
-# SMC FRACTAL BOT — CONFIGURATION
-# Multi-pair config with per-pair settings
-
-# ─── STRATEGY PARAMETERS (default) ───────────────────────────
 strategy:
   lookback: 12
   sweep_threshold: 0.008
   center_proximity: 0.012
   tp_multiplier: 1.0
   timeout: 15
-  tp_mode: 'structure'  # 'r_multiple' или 'structure'
+  tp_mode: structure
   structure_tp_lookback: 50
-
-# ─── TRAILING STOP ──────────────────────────────────────────
 trailing:
   enabled: true
   breakeven_at: 0.3
   trail_activate: 0.8
   trail_step: 0.3
-
-# ─── RISK MANAGEMENT ───────────────────────────────────────
 risk:
   risk_percent: 1.0
   commission: 0.001
@@ -29,8 +21,6 @@ risk:
   max_consecutive_losses: 3
   max_daily_trades: 20
   max_leverage: 10
-
-# ─── DYNAMIC RISK (DD + PF) ────────────────────────────────
 dynamic_risk:
   enabled: true
   base_risk: 1.5
@@ -40,8 +30,6 @@ dynamic_risk:
   dd_threshold_2: 10.0
   pf_hot: 2.0
   pf_window: 20
-
-# ─── FILTERS ───────────────────────────────────────────────
 filters:
   adx_filter:
     enabled: true
@@ -53,250 +41,159 @@ filters:
   volume_filter:
     enabled: false
     volume_multiplier: 1.5
-
-# ─── AUTO-OPTIMIZATION ──────────────────────────────────────
 optimizer:
   trigger_days: 90
   trigger_trades: 15
   trigger_pf_drop: 1.2
   cooldown_trades: 30
   optimize_params:
-    - lookback
-    - sweep_threshold
-    - center_proximity
-    - tp_multiplier
-    - timeout
+  - lookback
+  - sweep_threshold
+  - center_proximity
+  - tp_multiplier
+  - timeout
   param_ranges:
-    lookback: [8, 12]
-    sweep_threshold: [0.005, 0.008, 0.012]
-    center_proximity: [0.005, 0.008, 0.012]
-    tp_multiplier: [1.0, 2.0]
-    timeout: [6, 15]
-  min_improvement: 0.10
-
-# ─── ASSETS ─────────────────────────────────────────────────
-# Rolling WF results (Aug 2026):
-#   DOGE: AVG PF=2.74, MIN PF=1.79 — best
-#   DOT:  AVG PF=2.32, MIN PF=1.54 — stable
-#   ETH:  AVG PF=2.15, MIN PF=1.42 — reliable
-#   BNB:  AVG PF=1.81, MIN PF=1.39 — baseline
+    lookback:
+    - 8
+    - 12
+    sweep_threshold:
+    - 0.005
+    - 0.008
+    - 0.012
+    center_proximity:
+    - 0.005
+    - 0.008
+    - 0.012
+    tp_multiplier:
+    - 1.0
+    - 2.0
+    timeout:
+    - 6
+    - 15
+  min_improvement: 0.1
 assets:
-  - symbol: ETHUSDT
-    enabled: true
-    # ETH rolling WF: AVG PF=2.15, MIN PF=1.42
-    config:
-      strategy:
-        lookback: 12
-        sweep_threshold: 0.005
-        center_proximity: 0.015
-        tp_multiplier: 1.0
-        timeout: 20
-      filters:
-        adx_filter:
-          enabled: true
-          min_adx: 25
-      trailing:
+- enabled: true
+  strategy_type: zdev
+  config:
+    strategy:
+      lookback: 12
+      sweep_threshold: 0.008
+      center_proximity: 0.012
+      tp_multiplier: 1.0
+      timeout: 15
+    filters:
+      adx_filter:
         enabled: true
-        breakeven_at: 0.3
-        trail_activate: 0.8
-        trail_step: 0.3
-
-  - symbol: BNBUSDT
-    enabled: false
-    # BNB rolling WF: AVG PF=1.81, MIN PF=1.39
-    config:
-      strategy:
-        lookback: 12
-        sweep_threshold: 0.008
-        center_proximity: 0.015
-        tp_multiplier: 1.0
-        timeout: 20
-      filters:
-        adx_filter:
-          enabled: true
-          min_adx: 25
-      trailing:
+        min_adx: 25
+    trailing:
+      enabled: true
+      breakeven_at: 0.3
+      trail_activate: 0.8
+      trail_step: 0.3
+  symbol: ADAUSDT
+  '#': 'ADA ZDev rolling: AVG PF=3.94, MIN PF=2.79, WF 6/6'
+- enabled: true
+  strategy_type: zdev
+  config:
+    strategy:
+      lookback: 12
+      sweep_threshold: 0.008
+      center_proximity: 0.012
+      tp_multiplier: 1.0
+      timeout: 15
+    filters:
+      adx_filter:
         enabled: true
-        breakeven_at: 0.3
-        trail_activate: 0.8
-        trail_step: 0.3
-
-  - symbol: DOGEUSDT
-    enabled: false
-    # DOGE rolling WF: AVG PF=2.74, MIN PF=1.79 — best performer
-    config:
-      strategy:
-        lookback: 12
-        sweep_threshold: 0.005
-        center_proximity: 0.015
-        tp_multiplier: 1.0
-        timeout: 20
-      filters:
-        adx_filter:
-          enabled: true
-          min_adx: 25
-      trailing:
+        min_adx: 25
+    trailing:
+      enabled: true
+      breakeven_at: 0.3
+      trail_activate: 0.8
+      trail_step: 0.3
+  symbol: NEARUSDT
+  '#': 'NEAR ZDev rolling: AVG PF=2.75, MIN PF=1.45, WF 5/6'
+- enabled: true
+  strategy_type: zdev
+  config:
+    strategy:
+      lookback: 12
+      sweep_threshold: 0.008
+      center_proximity: 0.012
+      tp_multiplier: 1.0
+      timeout: 15
+    filters:
+      adx_filter:
         enabled: true
-        breakeven_at: 0.3
-        trail_activate: 0.8
-        trail_step: 0.3
-
-  - symbol: DOTUSDT
-    enabled: false
-    # DOT rolling WF: AVG PF=2.32, MIN PF=1.54
-    config:
-      strategy:
-        lookback: 8
-        sweep_threshold: 0.005
-        center_proximity: 0.012
-        tp_multiplier: 1.0
-        timeout: 15
-      filters:
-        adx_filter:
-          enabled: true
-          min_adx: 25
-      trailing:
+        min_adx: 25
+    trailing:
+      enabled: true
+      breakeven_at: 0.3
+      trail_activate: 0.8
+      trail_step: 0.3
+  symbol: ARBUSDT
+  '#': 'ARB ZDev rolling: AVG PF=3.36, MIN PF=1.11, WF 4/6'
+- enabled: true
+  strategy_type: zdev
+  config:
+    strategy:
+      lookback: 12
+      sweep_threshold: 0.008
+      center_proximity: 0.012
+      tp_multiplier: 1.0
+      timeout: 15
+    filters:
+      adx_filter:
         enabled: true
-        breakeven_at: 0.3
-        trail_activate: 0.8
-        trail_step: 0.3
-
-  - symbol: BTCUSDT
-    enabled: false
-    config:
-      strategy:
-        lookback: 12
-        sweep_threshold: 0.008
-        center_proximity: 0.012
-        tp_multiplier: 1.0
-        timeout: 15
-      filters:
-        adx_filter:
-          enabled: true
-          min_adx: 25
-      trailing:
+        min_adx: 25
+    trailing:
+      enabled: true
+      breakeven_at: 0.3
+      trail_activate: 0.8
+      trail_step: 0.3
+  symbol: SOLUSDT
+  '#': 'SOL ZDev rolling: AVG PF=2.20, MIN PF=1.47, WF 6/6'
+- enabled: true
+  strategy_type: zdev
+  config:
+    strategy:
+      lookback: 12
+      sweep_threshold: 0.008
+      center_proximity: 0.012
+      tp_multiplier: 1.0
+      timeout: 15
+    filters:
+      adx_filter:
         enabled: true
-        breakeven_at: 0.3
-        trail_activate: 0.8
-        trail_step: 0.3
-
-  - symbol: SOLUSDT
-    enabled: false
-    config:
-      strategy:
-        lookback: 12
-        sweep_threshold: 0.008
-        center_proximity: 0.012
-        tp_multiplier: 1.0
-        timeout: 15
-      filters:
-        adx_filter:
-          enabled: true
-          min_adx: 25
-      trailing:
+        min_adx: 25
+    trailing:
+      enabled: true
+      breakeven_at: 0.3
+      trail_activate: 0.8
+      trail_step: 0.3
+  symbol: DOGEUSDT
+  '#': 'DOGE ZDev rolling: AVG PF=2.38, MIN PF=1.35, WF 5/6'
+- enabled: true
+  strategy_type: zdev
+  config:
+    strategy:
+      lookback: 12
+      sweep_threshold: 0.008
+      center_proximity: 0.012
+      tp_multiplier: 1.0
+      timeout: 15
+    filters:
+      adx_filter:
         enabled: true
-        breakeven_at: 0.3
-        trail_activate: 0.8
-        trail_step: 0.3
-
-  - symbol: RENDERUSDT
-    enabled: false
-    config:
-      strategy:
-        lookback: 12
-        sweep_threshold: 0.008
-        center_proximity: 0.012
-        tp_multiplier: 1.0
-        timeout: 15
-      filters:
-        adx_filter:
-          enabled: true
-          min_adx: 25
-      trailing:
-        enabled: true
-        breakeven_at: 0.3
-        trail_activate: 0.8
-        trail_step: 0.3
-
-  - symbol: LINKUSDT
-    enabled: false
-    config:
-      strategy:
-        lookback: 12
-        sweep_threshold: 0.005
-        center_proximity: 0.012
-        tp_multiplier: 1.0
-        timeout: 15
-      filters:
-        adx_filter:
-          enabled: true
-          min_adx: 30
-      trailing:
-        enabled: true
-        breakeven_at: 0.3
-        trail_activate: 0.8
-        trail_step: 0.3
-
-  - symbol: GRAMUSDT
-    enabled: true
-    config:
-      strategy:
-        lookback: 12
-        sweep_threshold: 0.008
-        center_proximity: 0.012
-        tp_multiplier: 1.0
-        timeout: 15
-      filters:
-        adx_filter:
-          enabled: true
-          min_adx: 25
-      trailing:
-        enabled: true
-        breakeven_at: 0.3
-        trail_activate: 0.8
-        trail_step: 0.3
-
-  - symbol: SUIUSDT
-    enabled: false
-    config:
-      strategy:
-        lookback: 12
-        sweep_threshold: 0.008
-        center_proximity: 0.012
-        tp_multiplier: 1.0
-        timeout: 15
-      filters:
-        adx_filter:
-          enabled: true
-          min_adx: 25
-      trailing:
-        enabled: true
-        breakeven_at: 0.3
-        trail_activate: 0.8
-        trail_step: 0.3
-
-  - symbol: APTUSDT
-    enabled: false
-    config:
-      strategy:
-        lookback: 12
-        sweep_threshold: 0.008
-        center_proximity: 0.012
-        tp_multiplier: 1.0
-        timeout: 15
-      filters:
-        adx_filter:
-          enabled: true
-          min_adx: 25
-      trailing:
-        enabled: true
-        breakeven_at: 0.3
-        trail_activate: 0.8
-        trail_step: 0.3
-
-# ─── NOTIFICATIONS ──────────────────────────────────────────
+        min_adx: 25
+    trailing:
+      enabled: true
+      breakeven_at: 0.3
+      trail_activate: 0.8
+      trail_step: 0.3
+  symbol: XRPUSDT
+  '#': 'XRP ZDev rolling: AVG PF=3.07, MIN PF=1.76, WF 4/6'
 notifications:
   telegram:
     enabled: false
-    bot_token: ""
-    chat_id: ""
+    bot_token: ''
+    chat_id: ''

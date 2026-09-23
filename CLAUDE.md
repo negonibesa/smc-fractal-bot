@@ -1,7 +1,7 @@
 # SMC Fractal Bot — Project Context
 
 ## What
-SMC (Smart Money Concepts) fractal trading bot for Bybit Demo Trading. 4H candles, sweep→center→return logic, 2 coins live: ETHUSDT, GRAMUSDT.
+SMC fractal trading bot for Bybit Demo Trading. 4H candles, sweep→center→return logic. Production strategy is **ZDev A 2.0** (z-score order-flow entry, not SMC). 6 coins live: ADAUSDT, NEARUSDT, ARBUSDT, SOLUSDT, DOGEUSDT, XRPUSDT.
 
 ## VPS
 - **IP:** 161.104.18.192, root, pass `gC8Bk6zHdgPGa5hT`
@@ -21,10 +21,31 @@ SMC (Smart Money Concepts) fractal trading bot for Bybit Demo Trading. 4H candle
 - `breakeven_at: 0.3` — move SL to entry after 0.3R profit
 - H/L center (`use_body=False`) — validated by 2x2 A/B test: H/L PF=1.41 vs Body PF=0.95
 
+## Live Config → ZDev A 2.0 (одно «окно», все 6 монет)
+```
+baseline:     3 / 5.0с
+zdev_signal: 0.5R / 4h (1H не берём — PF падает, шум)
+strategy:    ZDev A 2.0 = z-score order-flow on 4H only
+
+ПУЛ (6 монет, все zdev, демо):
+ADAUSDT  PF 3.94 / +768% / DD 9.2 / WF 6/6
+NEARUSDT PF 2.75 / +165% / DD 6.7 / WF 5/6
+ARBUSDT  PF 3.36 / +196% / DD 7.6 / WF 4/6
+SOLUSDT  PF 2.20 / +130% / DD 6.2 / WF 6/6
+DOGEUSDT PF 2.38 / +146% / DD 6.3 / WF 5/6
+XRPUSDT  PF 3.07 / +314% / DD 9.8 / WF 4/6
+```
+Выбыли на этапе скрининга/WF (не в бою): ETH (WF 3/6), SUI (DD 10.5%),
+INJ/GRAM/AVAX/GRAM(листинг)/SUI/BTC/ATOM (DD/WF — не прошли), BTC/ETH — SMC больше не используется.
+
 ## Key Parameters (settings.yaml)
 ```
-ETHUSDT: lb=12, sw=0.005, prox=0.015, tp=1.0
-GRAMUSDT: lb=12, sw=0.008, prox=0.012, tp=1.0
+ADAUSDT: lb=12, sw=0.008, prox=0.012, tp=1.0, timeout=15, adx=25
+NEARUSDT: lb=12, sw=0.008, prox=0.012, tp=1.0, adx=25
+ARBUSDT: lb=12, sw=0.008, prox=0.012, tp=1.0, adx=25
+SOLUSDT: lb=12, sw=0.008, prox=0.012, tp=1.0, adx=25
+DOGEUSDT: lb=12, sw=0.008, prox=0.012, tp=1.0, adx=25
+XRPUSDT: lb=12, sw=0.008, prox=0.012, tp=1.0, adx=25
 ```
 
 ## Architecture
@@ -55,10 +76,11 @@ GRAMUSDT: lb=12, sw=0.008, prox=0.012, tp=1.0
 - Telegram blocked by Oracle Cloud network policy
 
 ## Financials
-- Start equity: $171,827 (real demo start)
-- Current equity: ~$168,605 (41 buggy trades lost $2,867 early on)
-- 2 coins live: ETHUSDT (bull), GRAMUSDT (bull)
+- Start equity: $171,827 → сброшен рестартом на $166,242.48 (demо-рестарт 2026-09-23, RESTORE)
+- Current equity: $166,242.48 (6 монет zdev, демо, старт боевого пула)
+- **6 coins live (все zdev):** ADAUSDT, NEARUSDT, ARBUSDT, SOLUSDT, DOGEUSDT, XRPUSDT
 - Dynamic risk: base_risk=1.5 (overrides risk_percent=1.0)
+- Сделки/пары мониторятся через dashboard (http://161.104.18.192, порт 80) и `docker logs smc-bot`
 
 ## DO NOT
 - Use body center (`use_body=True`) — degrades PF from 1.41 to 0.95

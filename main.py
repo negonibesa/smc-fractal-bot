@@ -25,6 +25,7 @@ from core.regime_detector import detect_regime, adapt_params_for_regime
 from core.reporter import Reporter
 from core.dashboard import Dashboard
 from smc_features import find_consolidation_center, detect_sweep, calculate_adx, find_structure_tp
+from strategies_v2 import StrategiesV2
 
 load_dotenv()
 
@@ -283,6 +284,43 @@ class SignalGenerator:
         return None
 
 
+# ─── ZDEV SIGNAL GENERATOR ─────────────────────────────────────────
+
+class ZDevSignalGenerator:
+    """ZDev A 2.0 live evaluator — ждёт Z-Order свечу (z>=2σ) при цене >=2 ATR
+    от равновесия; вход в сторону выравнивания. Stateless: пересчёт каждый цикл."""
+
+    def __init__(self, symbol: str = ''):
+        self.symbol = symbol
+        self.cfg = {
+            'zdev_atr_min': 2.0,
+            'z_threshold': 2.0,
+            'lookback': 20,
+        }
+
+    def process_candle(self, df: pd.DataFrame, candle_index: int) -> dict | None:
+        try:
+            s = StrategiesV2(df, cfg=self.cfg)
+            sig = s.z_deviation(candle_index, variant='A')
+        except Exception as e:
+            logger.warning(f"ZDev eval error {self.symbol}: {e}")
+            return None
+        if not sig or candle_index < self.cfg['lookback']:
+            return None
+        return {
+            'direction': sig['direction'],
+            'entry': float(sig['entry']),
+            'stop': float(sig['stop']),
+            'tp': float(sig['tp']),
+            'timestamp': str(sig['timestamp']),
+            'strategy': 'zdev',
+            'extras': {
+                'z': float(sig['z']) if sig.get('z') is not None else None,
+                'dev_frac': float(sig['dev_frac']) if sig.get('dev_frac') is not None else None,
+            },
+        }
+
+
 # ─── TRAILING MANAGER ──────────────────────────────────────────────
 
 class TrailingManager:
@@ -491,16 +529,30 @@ class SMCFractalBot:
         self.sync_fail_count = {}  # symbol → consecutive failures
         
         # Signal dedup: track last signal candle index to avoid spam
-        self.last_signal_candle = {}  # symbol → candle_index
+        # Key: (symbol, strategy) → candle timestamp
+        self.last_signal_candle = {}
+
+        # Per-strategy signal counters (persisted to Redis meta)
+        self.strategy_signals = {'smc': 0, 'zdev': 0}
+        if self.redis:
+            try:
+                meta = self.redis.load_meta()
+                if meta and isinstance(meta.get('strategy_signals'), dict):
+                    for k in self.strategy_signals:
+                        self.strategy_signals[k] = int(meta['strategy_signals'].get(k, 0))
+            except Exception as e:
+                logger.warning(f"Failed to restore strategy_signals: {e}")
         
-        # Symbols — each with its own config
+# Symbols — each with its own config and strategy type
         self.symbols = []
         self.symbol_configs = {}
+        self.symbol_strategy = {}  # symbol → 'smc' | 'zdev'
         self.locked_configs = set()  # symbols with lock_config=true — optimizer won't touch
         for asset in config.get('assets', []):
             if asset.get('enabled', False):
                 sym = asset['symbol']
                 self.symbols.append(sym)
+                self.symbol_strategy[sym] = asset.get('strategy_type', 'smc')
                 if 'config' in asset:
                     self.symbol_configs[sym] = asset['config']
                 else:
@@ -512,15 +564,21 @@ class SMCFractalBot:
                 if asset.get('lock_config', False):
                     self.locked_configs.add(sym)
                     logger.info(f"  {sym}: config LOCKED (optimizer disabled)")
-        
+
         # Per-symbol signal generators (must be after self.symbols is defined)
         self.signal_gens = {}
+        self.zdev_gens = {}
         for sym in self.symbols:
-            sym_config = {
-                'strategy': self._get_symbol_strategy(sym),
-                'filters': self._get_symbol_filters(sym),
-            }
-            self.signal_gens[sym] = SignalGenerator(sym_config, symbol=sym)
+            strat = self.symbol_strategy.get(sym, 'smc')
+            if strat == 'zdev':
+                self.zdev_gens[sym] = ZDevSignalGenerator(symbol=sym)
+            else:
+                sym_config = {
+                    'strategy': self._get_symbol_strategy(sym),
+                    'filters': self._get_symbol_filters(sym),
+                }
+                self.signal_gens[sym] = SignalGenerator(sym_config, symbol=sym)
+            logger.info(f"  {sym}: strategy={strat}")
         
         # Restore signal states from Redis
         if self.redis:
@@ -582,6 +640,42 @@ class SMCFractalBot:
             })
         except Exception as e:
             logger.error(f"Redis save signal state failed: {e}")
+
+    def _bump_strategy_signals(self, strat: str):
+        """Increment per-strategy signal counter and persist to Redis meta."""
+        self.strategy_signals[strat] = self.strategy_signals.get(strat, 0) + 1
+        if self.redis:
+            try:
+                meta = self.redis.load_meta() or {}
+                meta['strategy_signals'] = self.strategy_signals
+                self.redis.save_meta(meta)
+            except Exception:
+                pass
+
+    def _log_signal_event(self, symbol: str, strat: str, sig: dict):
+        """Append structured signal event to logs/strategy_signals.jsonl (keep 2000)."""
+        import json
+        path = Path(__file__).parent / "logs" / "strategy_signals.jsonl"
+        try:
+            rec = {
+                'time': datetime.utcnow().isoformat() + 'Z',
+                'symbol': symbol,
+                'strategy': strat,
+                'direction': sig.get('direction'),
+                'entry': sig.get('entry'),
+                'stop': sig.get('stop'),
+                'tp': sig.get('tp'),
+            }
+            if sig.get('extras'):
+                for k, v in sig['extras'].items():
+                    rec[k] = v
+            with open(path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(rec) + "\n")
+            lines = path.read_text(encoding='utf-8').splitlines()
+            if len(lines) > 2000:
+                path.write_text("\n".join(lines[-2000:]) + "\n", encoding='utf-8')
+        except Exception as e:
+            logger.error(f"signal log failed: {e}")
 
     def _save_optimize_check(self, symbol: str, dt: datetime):
         """Save last optimize check timestamp to Redis."""
@@ -718,15 +812,19 @@ class SMCFractalBot:
         
         # 1. Получить свечи
         df = self.fetch_candles(symbol, interval=CANDLE_INTERVAL, limit=200)
-        sig_gen = self.signal_gens.get(symbol, self.signal_gen)
-        if df.empty or len(df) < sig_gen.lookback + 5:
+        strat_type = self.symbol_strategy.get(symbol, 'smc')
+        if strat_type == 'zdev':
+            sig_gen = self.zdev_gens.get(symbol)
+        else:
+            sig_gen = self.signal_gens.get(symbol, self.signal_gen)
+        if df.empty or len(df) < 25:
             return
         
         # 2. Синхронизировать позицию
         self.sync_position(symbol)
         
-        # 2b. Update 1D trend if trend filter enabled
-        if sig_gen.trend_1d_enabled:
+        # 2b. Update 1D trend if trend filter enabled (SMC generators only)
+        if strat_type == 'smc' and getattr(sig_gen, 'trend_1d_enabled', False):
             try:
                 df_1d = self.fetch_candles(symbol, interval="D", limit=100)
                 if len(df_1d) >= 50:
@@ -750,30 +848,33 @@ class SMCFractalBot:
                 'strength': float(regime.get('strength', 0)),
                 'last_candle': len(df) - 2,
             }
-            # Adapt params for regime
-            current_params = self._get_symbol_strategy(symbol)
-            adapted = self.optimizer.get_regime_params(symbol, regime['regime'], current_params)
-            if adapted != current_params:
-                self.symbol_configs[symbol]['strategy'].update(adapted)
-                # Rebuild signal generator with adapted params, preserving state
-                old_gen = self.signal_gens.get(symbol)
-                sym_config = {
-                    'strategy': self._get_symbol_strategy(symbol),
-                    'filters': self._get_symbol_filters(symbol),
-                }
-                new_gen = SignalGenerator(sym_config, symbol=symbol)
-                if old_gen:
-                    new_gen.state = old_gen.state
-                    new_gen.sweep_direction = old_gen.sweep_direction
-                    new_gen.sweep_price = old_gen.sweep_price
-                    new_gen.sweep_index = old_gen.sweep_index
-                    new_gen.center_at_sweep = old_gen.center_at_sweep
-                    new_gen.sweep_time = old_gen.sweep_time
-                self.signal_gens[symbol] = new_gen
-                logger.info(f"REGIME ADAPT {symbol}: {regime['regime']} → params updated")
-            elif regime['regime'] != 'sideways':
-                logger.info(f"REGIME {symbol}: {regime['regime']} "
-                          f"(adx={regime['adx']:.1f}, strength={regime['strength']:.2f})")
+            # Adapt params for regime — only for SMC strategy symbols
+            if strat_type == 'smc':
+                current_params = self._get_symbol_strategy(symbol)
+                adapted = self.optimizer.get_regime_params(symbol, regime['regime'], current_params)
+                if adapted != current_params:
+                    self.symbol_configs[symbol]['strategy'].update(adapted)
+                    # Rebuild signal generator with adapted params, preserving state
+                    old_gen = self.signal_gens.get(symbol)
+                    sym_config = {
+                        'strategy': self._get_symbol_strategy(symbol),
+                        'filters': self._get_symbol_filters(symbol),
+                    }
+                    new_gen = SignalGenerator(sym_config, symbol=symbol)
+                    if old_gen:
+                        new_gen.state = old_gen.state
+                        new_gen.sweep_direction = old_gen.sweep_direction
+                        new_gen.sweep_price = old_gen.sweep_price
+                        new_gen.sweep_index = old_gen.sweep_index
+                        new_gen.center_at_sweep = old_gen.center_at_sweep
+                        new_gen.sweep_time = old_gen.sweep_time
+                    self.signal_gens[symbol] = new_gen
+                    logger.info(f"REGIME ADAPT {symbol}: {regime['regime']} → params updated")
+                elif regime['regime'] != 'sideways':
+                    logger.info(f"REGIME {symbol}: {regime['regime']} "
+                              f"(adx={regime['adx']:.1f}, strength={regime['strength']:.2f})")
+            else:
+                logger.debug(f"REGIME {symbol}: {regime['regime']} (strategy={strat_type}, no params adapt)")
         
         # 3. Trailing update для открытой позиции
         if self.tracker.has_position(symbol):
@@ -828,26 +929,30 @@ class SMCFractalBot:
             # Используем предпоследнюю свечу (текущая ещё не закрыта)
             candle_idx = len(df) - 2
             
-            # Skip if we already generated a signal on this candle (prevent spam)
+# Skip if we already generated a signal on this candle (prevent spam)
             # NB: candle_idx is (len-2) of a fixed-200-candle window, so index is
             # constant across bars; dedup must key on the candle timestamp.
             candle_ts = df['timestamp'].iloc[candle_idx]
-            last_sig_ts = self.last_signal_candle.get(symbol)
+            dedup_key = (symbol, strat_type)
+            last_sig_ts = self.last_signal_candle.get(dedup_key)
             if last_sig_ts is not None and last_sig_ts == candle_ts:
                 return
-            
+
             sig = sig_gen.process_candle(df, candle_idx)
-            self._save_signal_state(symbol)
-            
+            if strat_type == 'smc':
+                self._save_signal_state(symbol)
+
             if sig:
-                self.last_signal_candle[symbol] = candle_ts
+                self.last_signal_candle[dedup_key] = candle_ts
                 direction = sig['direction']
                 entry = sig['entry']
                 stop = sig['stop']
                 tp = sig['tp']
-                
-                logger.info(f"SIGNAL: {direction} {symbol} @ {entry:.2f} SL={stop:.2f} TP={tp:.2f}")
-                
+
+                logger.info(f"SIGNAL [{strat_type}]: {direction} {symbol} @ {entry:.2f} SL={stop:.2f} TP={tp:.2f}")
+                self._bump_strategy_signals(strat_type)
+                self._log_signal_event(symbol, strat_type, sig)
+
                 # Вход
                 if direction == "BUY":
                     result = self.executor.open_long(symbol, entry, stop, tp)
@@ -860,8 +965,9 @@ class SMCFractalBot:
                     
                     if size > 0:
                         tracker_side = "LONG" if direction == "BUY" else "SHORT"
-                        self.tracker.open_position(symbol, tracker_side, entry, size, stop, tp)
-                        logger.info(f"OPENED: {tracker_side} {size} {symbol} @ {entry:.2f}")
+                        self.tracker.open_position(symbol, tracker_side, entry, size, stop, tp,
+                                                   strategy=strat_type)
+                        logger.info(f"OPENED [{strat_type}]: {tracker_side} {size} {symbol} @ {entry:.2f}")
                         self.notifier.send_entry(symbol, direction, entry, stop, tp, size)
                 elif result.success and not result.sl_tp_ok:
                     logger.error(f"Position opened but SL/TP failed — emergency closed {symbol}")
@@ -975,9 +1081,13 @@ class SMCFractalBot:
         mode = 'testnet' if testnet else 'demo' if demo else 'mainnet'
         logger.info(f"Mode: {mode}")
         for sym in self.symbols:
-            strat = self._get_symbol_strategy(sym)
-            logger.info(f"  {sym}: lb={strat.get('lookback')} sw={strat.get('sweep_threshold')} "
-                       f"prox={strat.get('center_proximity')} tp={strat.get('tp_multiplier')}")
+            stype = self.symbol_strategy.get(sym, 'smc')
+            if stype == 'zdev':
+                logger.info(f"  {sym}: strategy=zdev (Z-Order ≥2σ, dev ≥2 ATR, TP=eq)")
+            else:
+                strat = self._get_symbol_strategy(sym)
+                logger.info(f"  {sym}: strategy=smc lb={strat.get('lookback')} sw={strat.get('sweep_threshold')} "
+                           f"prox={strat.get('center_proximity')} tp={strat.get('tp_multiplier')}")
         logger.info("="*60)
         
         self.notifier.send_start(self.symbols, testnet)
@@ -1057,7 +1167,12 @@ class SMCFractalBot:
                 last_check = self.last_optimize_check.get(symbol, datetime.min)
                 if (now - last_check).total_seconds() < 86400:  # max once/day
                     continue
-                
+
+                # ZDev strategy symbols use fixed params — no auto-optimization
+                if self.symbol_strategy.get(symbol, 'smc') != 'smc':
+                    self._save_optimize_check(symbol, now)
+                    continue
+
                 try:
                     risk_status = self.risk.get_status()
                     trades = risk_status.get('total_trades', 0)

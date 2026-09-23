@@ -47,6 +47,7 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("bot")
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 # ─── CLEANUP OLD LOGS ON STARTUP ──────────────────────────────────
 import glob as _glob
@@ -828,15 +829,18 @@ class SMCFractalBot:
             candle_idx = len(df) - 2
             
             # Skip if we already generated a signal on this candle (prevent spam)
-            last_sig_candle = self.last_signal_candle.get(symbol, -1)
-            if candle_idx == last_sig_candle:
+            # NB: candle_idx is (len-2) of a fixed-200-candle window, so index is
+            # constant across bars; dedup must key on the candle timestamp.
+            candle_ts = df['timestamp'].iloc[candle_idx]
+            last_sig_ts = self.last_signal_candle.get(symbol)
+            if last_sig_ts is not None and last_sig_ts == candle_ts:
                 return
             
             sig = sig_gen.process_candle(df, candle_idx)
             self._save_signal_state(symbol)
             
             if sig:
-                self.last_signal_candle[symbol] = candle_idx
+                self.last_signal_candle[symbol] = candle_ts
                 direction = sig['direction']
                 entry = sig['entry']
                 stop = sig['stop']
@@ -1008,39 +1012,44 @@ class SMCFractalBot:
                     self.notifier.send_error(str(e), f"Cycle {symbol}")
             
             # Daily report at 00:10 UTC, weekly on Sunday
-            now = datetime.utcnow()
-            balance = self.client.get_wallet_balance()
-            equity = float(balance.get('totalEquity', 0)) if balance else 0
-            
-            # Set start_equity on first loop iteration — ONLY once, never overwrite
-            if self.start_equity == 0 and equity > 0:
-                if self.redis:
-                    try:
-                        existing = self.redis.load_meta()
-                        if existing and 'start_equity' in existing and existing['start_equity'] > 0:
-                            self.start_equity = existing['start_equity']
-                        else:
+            # Wrapped in try/except so a failure (e.g. Telegram unreachable,
+            # Bybit API hiccup) can never crash the main loop at midnight.
+            try:
+                now = datetime.utcnow()
+                balance = self.client.get_wallet_balance()
+                equity = float(balance.get('totalEquity', 0)) if balance else 0
+                
+                # Set start_equity on first loop iteration — ONLY once, never overwrite
+                if self.start_equity == 0 and equity > 0:
+                    if self.redis:
+                        try:
+                            existing = self.redis.load_meta()
+                            if existing and 'start_equity' in existing and existing['start_equity'] > 0:
+                                self.start_equity = existing['start_equity']
+                            else:
+                                self.start_equity = equity
+                                self.redis.save_meta({'start_equity': equity, 'start_time': self.start_time.isoformat()})
+                        except Exception:
                             self.start_equity = equity
-                            self.redis.save_meta({'start_equity': equity, 'start_time': self.start_time.isoformat()})
-                    except Exception:
+                    else:
                         self.start_equity = equity
-                else:
-                    self.start_equity = equity
-                logger.info(f"START EQUITY: ${self.start_equity:,.2f}")
-            
-            # Update risk manager with current equity
-            self.risk.update_equity(equity)
+                    logger.info(f"START EQUITY: ${self.start_equity:,.2f}")
+                
+                # Update risk manager with current equity
+                self.risk.update_equity(equity)
 
-            if now.date() > last_report_day and now.hour == 0 and now.minute < 10:
-                self.reporter.send_daily(equity, self.tracker.positions, self.regime_state)
-                self.risk.reset_daily()
-                last_report_day = now.date()
+                if now.date() > last_report_day and now.hour == 0 and now.minute < 10:
+                    self.reporter.send_daily(equity, self.tracker.positions, self.regime_state)
+                    self.risk.reset_daily()
+                    last_report_day = now.date()
 
-            # Weekly report on Sunday
-            if now.weekday() == 6 and (last_week_report_day is None or now.date() != last_week_report_day):
-                if now.hour == 0 and now.minute < 10:
-                    self.reporter.send_weekly(equity, self.tracker.positions, self.regime_state)
-                    last_week_report_day = now.date()
+                # Weekly report on Sunday
+                if now.weekday() == 6 and (last_week_report_day is None or now.date() != last_week_report_day):
+                    if now.hour == 0 and now.minute < 10:
+                        self.reporter.send_weekly(equity, self.tracker.positions, self.regime_state)
+                        last_week_report_day = now.date()
+            except Exception as e:
+                logger.error(f"Daily/weekly report block failed (loop continues): {e}", exc_info=True)
             
             # Auto-optimization check (once per day per symbol)
             days_running = (now - self.start_time).total_seconds() / 86400

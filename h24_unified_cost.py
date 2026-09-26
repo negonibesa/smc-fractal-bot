@@ -98,6 +98,10 @@ def run(prep, idx, risk, cap=CAP, size_on='equity', capital=CAPITAL,
     eq = np.empty(n)
     used = np.zeros(n, bool)
     R = []
+    # индекс бара выхода и символ каждой закрытой сделки — для помесячной
+    # разбивки в H27. На существующие метрики не влияет.
+    R_bar = []
+    R_sym = []
 
     for j in range(n):
         # --- входы на открытии бара
@@ -148,6 +152,8 @@ def run(prep, idx, risk, cap=CAP, size_on='equity', capital=CAPITAL,
             cash += pnl
             risk_dollars = q['qty'] * TRAIL * p['a'][q['ei']]
             R.append(pnl / risk_dollars if risk_dollars > 0 else 0.0)
+            R_bar.append(j)
+            R_sym.append(co)
             del openp[co]
 
         e = cash
@@ -172,7 +178,9 @@ def run(prep, idx, risk, cap=CAP, size_on='equity', capital=CAPITAL,
                 pf=float(w / l) if l > 0 else np.nan,
                 exp_r=float(R.mean()) if len(R) else np.nan,
                 wr=float((R > 0).mean()) if len(R) else np.nan,
-                eq=eq, idx=idx, dd=dd, R=R)
+                eq=eq, idx=idx, dd=dd, R=R,
+                R_bar=np.array(R_bar, dtype=int),
+                R_sym=np.array(R_sym, dtype=object))
 
 
 def mc(R, risk, n_iter=N_ITER, block=BLOCK, seed=SEED):

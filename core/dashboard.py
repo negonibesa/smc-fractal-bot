@@ -45,6 +45,37 @@ def _unauthorized_response() -> Response:
     )
 
 
+def _is_legacy_trade(trade: dict, current_strategy: str, switched_at) -> bool:
+    """True, если сделка принадлежит ПРЕЖНЕЙ стратегии, а не текущей.
+
+    Основной признак — поле strategy в записи сделки. Если его нет (старые
+    записи), откатываемся на время закрытия относительно момента переключения.
+    Неопознанное считаем текущей стратегией, чтобы не прятать реальные цифры.
+    """
+    strat = (trade.get('strategy') or '').strip().lower()
+    if strat:
+        return strat != current_strategy
+    if not switched_at:
+        return False
+    raw = trade.get('close_time') or trade.get('exit_time')
+    if raw is None:
+        return False
+    try:
+        if isinstance(raw, (int, float)):
+            ts = datetime.fromtimestamp(float(raw), timezone.utc)
+        else:
+            s = str(raw).strip().replace('Z', '+00:00')
+            try:
+                ts = datetime.fromisoformat(s)
+            except ValueError:
+                ts = datetime.fromisoformat(s.split('.')[0])
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+    except Exception:
+        return False
+    return ts < switched_at
+
+
 def _recent_signal_events(limit: int = 15) -> list:
     """Recent signals for both SMC and ZDev, read from strategy_signals.jsonl."""
     path = Path(__file__).parent.parent / "logs" / "strategy_signals.jsonl"
@@ -188,7 +219,9 @@ function renderStatus(d){
   var s='';
   s+=row('Mode',d.mode.toUpperCase(),d.mode==='demo'?'yellow':'green');
   s+=row('Running',d.running?'YES':'NO',d.running?'green':'red');
-  s+=row('Uptime',d.uptime);
+  s+=row('Strategy',(d.strategy||'?').toUpperCase(),'green');
+  s+=row('Uptime',d.uptime,d.uptime&&d.uptime.indexOf('m')>=0?'green':'yellow');
+  s+=row('Trading Since',(d.trading_since||'?')+' ('+(d.started_at||'?')+')');
   s+=row('Pairs Active',d.active_pairs);
   var coins=(d.coins&&d.coins.length)?d.coins:(d.symbols||[]).map(function(x){return {symbol:x,strategy:'smc'}});
   if(coins.length){
@@ -197,9 +230,14 @@ function renderStatus(d){
       var cls=p>0?'chip-p':(p<0?'chip-n':'chip-z');
       var sign=p>0?'+':(p<0?'-':'');
       var sym=c.symbol.replace(/USDT$/,'');
-      return '<span class="chip '+cls+'">'+sym+'<span style="color:#ffaa00">('+(c.trades||0)+')</span> '+sign+'$'+Math.abs(p).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})+'</span>';
+      var badge=(c.trades||0)>0?'<span style="color:#ffaa00">('+(c.trades||0)+')</span> ':'';
+      var leg=(c.legacy_trades||0)>0?'<span style="color:#888" title="closed before strategy switch"> +'+(c.legacy_trades||0)+' prev</span>':'';
+      return '<span class="chip '+cls+'">'+sym+badge+sign+'$'+Math.abs(p).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})+leg+'</span>';
     }).join('');
     s+='<div class="row"><span class="label">Coins</span></div><div style="text-align:right;padding:4px 0 6px;line-height:2.1">'+cs+'</div>';
+  }
+  if(d.legacy_trades>0){
+    s+='<div class="row"><span class="label">Note</span></div><div style="padding:2px 0 6px;color:#888">'+d.legacy_trades+' closed trade(s) belong to the previous strategy and are excluded from current PnL</div>';
   }
   document.getElementById('status').innerHTML=s;
 }
@@ -312,10 +350,17 @@ class Dashboard:
         try:
             balance = bot.client.get_wallet_balance()
             account["equity"] = float(balance.get("totalEquity", 0))
-            account["available"] = float(balance.get("availableToWithdraw", 0))
+            # unified-аккаунт Bybit: availableToWithdraw существует только
+            # внутри coin[] и на демо приходит пустой строкой. На верхнем
+            # уровне доступная маржа называется totalAvailableBalance.
+            account["available"] = float(balance.get("totalAvailableBalance", 0))
             coins = balance.get("coin", [])
-            upnl = sum(float(c.get("unrealisedPnl", 0)) for c in coins)
-            account["unrealized_pnl"] = upnl
+            if "totalPerpUPL" in balance:
+                account["unrealized_pnl"] = float(balance.get("totalPerpUPL", 0))
+            else:
+                account["unrealized_pnl"] = sum(
+                    float(c.get("unrealisedPnl", 0)) for c in coins
+                )
         except Exception:
             pass
 
@@ -365,14 +410,20 @@ class Dashboard:
         except Exception:
             pass
 
-        # Uptime
-        uptime_s = (datetime.now(timezone.utc) - bot.start_time.replace(tzinfo=timezone.utc)).total_seconds()
-        if uptime_s < 60:
-            uptime = f"{int(uptime_s)}s"
-        elif uptime_s < 3600:
-            uptime = f"{int(uptime_s/60)}m"
-        else:
-            uptime = f"{int(uptime_s/3600)}h {int((uptime_s%3600)/60)}m"
+        # Uptime: два разных числа. bot.start_time восстанавливается из Redis
+        # и при рестарте не меняется — по нему видно общий стаж торговли, но
+        # НЕ видно зависание или рестарт-луп. Для этого аптайм самого процесса.
+        def _fmt(seconds: float) -> str:
+            seconds = int(max(0, seconds))
+            if seconds < 60:
+                return f"{seconds}s"
+            if seconds < 3600:
+                return f"{seconds // 60}m"
+            return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
+
+        now_utc = datetime.now(timezone.utc)
+        uptime = _fmt((now_utc - bot.process_start).total_seconds())
+        trading_since = _fmt((now_utc - bot.start_time.replace(tzinfo=timezone.utc)).total_seconds())
 
         # Logs
         logs = []
@@ -405,13 +456,34 @@ class Dashboard:
 
         # Per-coin stats: trades count + PnL (one strategy, no tag needed)
         closed = list(getattr(bot.tracker, 'closed_trades', []) or [])
+        # Сделки, закрытые ДО переключения стратегии, восстанавливаются из Redis
+        # и принадлежат прежней стратегии. Помечаем их, иначе панель приписывает
+        # ZDev-результаты Donchian, который их не открывал.
+        current_strategy = ''
+        strat_map = getattr(bot, 'symbol_strategy', None) or {}
+        for sym in bot.symbols:
+            st = strat_map.get(sym)
+            if st:
+                current_strategy = str(st)
+                break
+        switched_at = getattr(bot, 'strategy_switched_at', None)
+        legacy = 0
         coins = []
         for sym in bot.symbols:
             ct = [t for t in closed if t.get('symbol') == sym]
+            if current_strategy:
+                ct_legacy = [t for t in ct
+                             if _is_legacy_trade(t, current_strategy, switched_at)]
+            else:
+                ct_legacy = []
+            ct_new = [t for t in ct if t not in ct_legacy]
+            legacy += len(ct_legacy)
             coins.append({
                 "symbol": sym,
-                "trades": len(ct),
-                "pnl": round(sum(t.get('pnl', 0) for t in ct), 2),
+                "trades": len(ct_new),
+                "legacy_trades": len(ct_legacy),
+                "pnl": round(sum(t.get('pnl', 0) for t in ct_new), 2),
+                "legacy_pnl": round(sum(t.get('pnl', 0) for t in ct_legacy), 2),
             })
 
         return {
@@ -424,7 +496,12 @@ class Dashboard:
                 "coins": coins,
                 "active_pairs": len(bot.symbols),
                 "uptime": uptime,
-                "time": datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
+                "trading_since": trading_since,
+                "started_at": bot.start_time.replace(tzinfo=timezone.utc).strftime(
+                    "%Y-%m-%d %H:%M UTC"),
+                "legacy_trades": legacy,
+                "strategy": current_strategy,
+                "time": now_utc.strftime("%H:%M:%S UTC"),
             },
             "positions": positions,
             "regime": regime,

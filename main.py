@@ -11,7 +11,7 @@ import yaml
 import signal
 import threading
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -481,6 +481,9 @@ class SMCFractalBot:
         # Auto-optimizer
         self.optimizer = AutoOptimizer(config, redis_store=self.redis)
         self.start_time = datetime.utcnow()
+        # Аптайм процесса: НЕ восстанавливается из Redis. Нужен дашборду,
+        # чтобы отличать зависание/рестарт-луп от общего стажа торговли.
+        self.process_start = datetime.now(timezone.utc)
         self.start_equity = 0.0  # set on first run loop
         # Restore start_equity and start_time from Redis
         try:
@@ -496,8 +499,22 @@ class SMCFractalBot:
                     logger.info(f"RESTORE start_time: {self.start_time.isoformat()}")
                 except Exception:
                     pass
+            # Момент переключения стратегии. Фиксируется ОДИН раз: до него
+            # закрытые сделки принадлежат прежней стратегии, и дашборд не
+            # должен приписывать их текущей.
+            if meta and meta.get('strategy_switched_at'):
+                self.strategy_switched_at = datetime.fromisoformat(
+                    meta['strategy_switched_at'])
+                logger.info(f"RESTORE strategy_switched_at: "
+                            f"{self.strategy_switched_at.isoformat()}")
+            else:
+                self.strategy_switched_at = self.process_start
+                logger.info(f"SET strategy_switched_at: "
+                            f"{self.strategy_switched_at.isoformat()}")
         except Exception as e:
             logger.warning(f"Failed to restore start_equity: {e}")
+            self.strategy_switched_at = getattr(
+                self, 'strategy_switched_at', self.process_start)
         self.last_optimize_check = {}  # symbol → datetime
         self.last_trade_close = {}  # symbol → timestamp of last trade close (cooldown)
         
@@ -542,7 +559,7 @@ class SMCFractalBot:
         self.last_signal_candle = {}
 
         # Per-strategy signal counters (persisted to Redis meta)
-        self.strategy_signals = {'smc': 0, 'zdev': 0}
+        self.strategy_signals = {'smc': 0, 'zdev': 0, 'donchian': 0}
         if self.redis:
             try:
                 meta = self.redis.load_meta()
@@ -1378,7 +1395,8 @@ class SMCFractalBot:
                                 self.start_equity = existing['start_equity']
                             else:
                                 self.start_equity = equity
-                                self.redis.save_meta({'start_equity': equity, 'start_time': self.start_time.isoformat()})
+                                self.redis.save_meta({'start_equity': equity, 'start_time': self.start_time.isoformat(),
+                                                       'strategy_switched_at': self.strategy_switched_at.isoformat()})
                         except Exception:
                             self.start_equity = equity
                     else:

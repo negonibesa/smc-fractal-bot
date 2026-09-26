@@ -37,16 +37,20 @@ def main():
     print('=' * 74)
 
     try:
-        bal = client.get_wallet_balance()
+        # get_wallet_balance() уже разворачивает result и берёт list[0],
+        # поэтому лезть в ['result']['list'] здесь нельзя — вернёт пусто.
+        info = client.get_wallet_balance()
     except Exception as e:
         print(f'баланс недоступен: {e}')
-        bal = {}
+        info = {}
 
-    info = bal.get('result', {}).get('list', [{}])[0]
     eq = float(info.get('totalEquity', 0) or 0)
-    cash = float(info.get('totalCashBalance', 0) or 0)
-    used = float(info.get('totalUsedMargin', 0) or 0)
-    print(f'equity {eq:,.2f} USDT   cash {cash:,.2f}   used margin {used:,.2f}')
+    avail = float(info.get('totalAvailableBalance', 0) or 0)
+    used = float(info.get('totalInitialMargin', 0) or 0)
+    print(f'equity {eq:,.2f} USDT   доступно {avail:,.2f}   маржа {used:,.2f}')
+    if eq <= 0:
+        print('ВНИМАНИЕ: equity == 0. Donchian считает размер от equity,')
+        print('при нуле все сделки получат нулевой размер и бот не сможет торговать.')
     print('')
 
     try:
@@ -101,7 +105,11 @@ def main():
             print('Все позиции входят в новый пул — переключение безопасно.')
 
     try:
-        orders = client.get_open_orders()
+        orders = client.get_open_orders('BTCUSDT')
+        orders = [o for o in orders if o.get('symbol')]
+    except TypeError:
+        # get_open_orders() требует symbol: без него Bybit отвечает 10001
+        orders = []
     except Exception as e:
         print(f'\nоткрытые ордера недоступны: {e}')
         return 0

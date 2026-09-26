@@ -115,7 +115,7 @@
   [OK  ] live-конфиг: commission_haircut=0 (паритет с H24)
   [OK  ] live-конфиг: невалидированные дневные лимиты отключены
   [OK  ] live-размер = H24 (equity*0.35%/2*ATR, без haircut)   size=145.46 risk%=0.3500
-  [OK  ] run_cycle: check_exits идёт ПЕРЕД обновлением трейлинга   check_exits@48697 < _donchian_trailing@49044
+  [OK  ] run_cycle: check_exits идёт ПЕРЕД обновлением трейлинга   check_exits@54296 < _donchian_trailing@54643
   [OK  ] run_cycle: трейлинг вызывается только если позиция не закрылась
 
 ============================================================================================

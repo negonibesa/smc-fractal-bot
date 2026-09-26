@@ -443,6 +443,17 @@ class Dashboard:
             pass
         if beat:
             bsym = beat.get("symbols") or {}
+            # Данные от другого процесса — нельзя выдавать за текущие.
+            # Иначе после рестарта до первого цикла дашборд показывал бы
+            # verdict (stalled/degraded) и last_error умершего процесса.
+            ps = beat.get("process_start")
+            mine = bot.process_start.timestamp()
+            if ps and abs(ps - mine) > 1:
+                health = "unknown"
+                health_note = "пульс от предыдущего процесса, ждём первый цикл"
+                beat = {}
+        if beat:
+            bsym = beat.get("symbols") or {}
             ages = [now_utc.timestamp() - v.get("last_cycle", 0)
                     for v in bsym.values() if v.get("last_cycle")]
             worst_age = max(ages) if ages else None

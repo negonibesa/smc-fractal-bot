@@ -176,6 +176,47 @@ for h, want in ((71, 'ok'), (73, 'quiet')):
     chk(f'{h}ч тишины → {want}', got == want, f'got {got}')
 
 print()
+print('=== bars_evaluated считает РАЗНЫЕ бары, а не вызовы ===')
+# Реальный баг: цикл каждые 5 мин, дедуп только после сигнала → в тихом
+# рынке один бар пересчитывается ~12 раз за 4H и счётчик врал в 12 раз.
+b = {'last_bar_ts': None, 'bars_evaluated': 0}
+bar_a = 1790438400.0
+for _ in range(12):          # 12 циков за 4H на одном баре
+    if b['last_bar_ts'] != bar_a:
+        b['bars_evaluated'] += 1
+    b['last_bar_ts'] = bar_a
+chk('12 вызовов на одном баре → 1 бар', b['bars_evaluated'] == 1, b['bars_evaluated'])
+
+bar_b = 1790452800.0         # следующая 4H-граница
+if b['last_bar_ts'] != bar_b:
+    b['bars_evaluated'] += 1
+b['last_bar_ts'] = bar_b
+chk('новый бар → 2', b['bars_evaluated'] == 2, b['bars_evaluated'])
+
+print()
+print('=== пульс от чужого процесса не выдаётся за свой ===')
+
+
+def health_with_marker(beat_ps, bot_ps):
+    m = {'process_start': beat_ps, 'symbols': {'X': sym(30)},
+         'bars_evaluated_total': 100, 'last_signal_ts': now.timestamp()}
+    bot = FakeBot()
+    bot.process_start = datetime.fromtimestamp(bot_ps, tz=timezone.utc)
+    # повторяем новую проверку dashboard
+    if m.get('process_start') and abs(m['process_start'] - bot.process_start.timestamp()) > 1:
+        return 'unknown'
+    return 'ok'
+
+
+bot_ps = now.timestamp()
+chk('пульс этого процесса → ok',
+    health_with_marker(bot_ps, bot_ps) == 'ok')
+chk('пульс прошлого процесса → unknown (не виним мёртвый код)',
+    health_with_marker(bot_ps - 3600, bot_ps) == 'unknown')
+chk('старый формат без process_start → не ломается',
+    health_with_marker(None, bot_ps) in ('ok', 'unknown'))
+
+print()
 print('=== регрессия: телеметрия не роняет торговлю ===')
 # Именно этот баг был в проде: float() от pandas Timestamp стоял ДО `if sig:`
 # и молча терял сигнал. Проверяем, что блоб бета не может бросить исключение

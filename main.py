@@ -488,7 +488,21 @@ class SMCFractalBot:
         # Restore start_equity and start_time from Redis
         try:
             meta = self.redis.load_meta() if self.redis else None
-            logger.info(f"LOAD META: {meta}")
+            # Не дамп целиком: meta разросся (last_optimize_check на все
+            # монеты + beat на все символы) и печатался целиком на каждом
+            # рестарте — 2.9KB шума, в котором главное (ошибки прошлого
+            # процесса) тонуло. Ошибки символов — в сводку, остальное в DEBUG.
+            if meta:
+                logger.info(f"LOAD META keys={sorted(meta.keys())} size={len(str(meta))}B")
+                _stale = [f"{k}: {v.get('last_error')}" for k, v
+                          in ((meta.get('beat') or {}).get('symbols') or {}).items()
+                          if v.get('last_error')]
+                if _stale:
+                    logger.warning(
+                        f"META beat от прошлого процесса, {len(_stale)} символов "
+                        f"с ошибками (обнулится на первом цикле): {_stale[:3]}"
+                    )
+                logger.debug(f"LOAD META full: {meta}")
             if meta and 'start_equity' in meta and meta['start_equity'] > 0:
                 self.start_equity = meta['start_equity']
                 logger.info(f"RESTORE start_equity: ${self.start_equity:,.2f}")
@@ -853,6 +867,10 @@ class SMCFractalBot:
             bars = sum(v.get('bars_evaluated', 0) for v in self.beat.values())
             meta['beat'] = {
                 'ts': now,
+                # Метка процесса: без неё дашборд после рестарта до первого
+                # цикла отдавал бы verdict и last_error ПРЕДЫДУЩЕГО процесса —
+                # то есть винил бы мёртвый код за живьё и у держащего.
+                'process_start': self.process_start.timestamp(),
                 'bars_evaluated_total': bars,
                 'last_signal_ts': self.last_signal_ts,
                 'symbols': self.beat,
@@ -1261,8 +1279,14 @@ class SMCFractalBot:
             # TypeError (float() от pandas Timestamp), который вылетал ДО
             # `if sig:` и молча ронял сигнал. Поэтому весь блок под try.
             try:
-                b['bars_evaluated'] += 1
-                b['last_bar_ts'] = candle_ts.timestamp()
+                ts = candle_ts.timestamp()
+                # Считаем РАЗНЫЕ бары, а не вызовы. Цикл бодрится каждые
+                # 5 минут, а дедуп выше срабатывает только после сигнала,
+                # поэтому в тихом рынке один бар пересчитывался бы ~12 раз
+                # за 4H и счётчик показывал 12 баров вместо одного.
+                if b.get('last_bar_ts') != ts:
+                    b['bars_evaluated'] += 1
+                b['last_bar_ts'] = ts
             except Exception as e:
                 logger.debug(f"beat update failed {symbol}: {e}")
             if strat_type == 'smc':

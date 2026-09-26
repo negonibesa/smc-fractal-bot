@@ -221,6 +221,10 @@ function renderStatus(d){
   s+=row('Running',d.running?'YES':'NO',d.running?'green':'red');
   s+=row('Strategy',(d.strategy||'?').toUpperCase(),'green');
   s+=row('Uptime',d.uptime,d.uptime&&d.uptime.indexOf('m')>=0?'green':'yellow');
+  var hc={ok:'green',quiet:'yellow',degraded:'yellow',stalled:'red',unknown:'yellow'}[d.health]||'yellow';
+  s+=row('Health',(d.health||'?').toUpperCase()+(d.health_note?' — '+d.health_note:''),hc);
+  s+=row('Bars Evaluated',(d.beat&&d.beat.bars_evaluated_total!=null)?d.beat.bars_evaluated_total:'—');
+  s+=row('Last Signal',(d.beat&&d.beat.quiet_hours!=null)?(d.beat.quiet_hours.toFixed(1)+'h назад'):'ещё не было');
   s+=row('Trading Since',(d.trading_since||'?')+' ('+(d.started_at||'?')+')');
   s+=row('Pairs Active',d.active_pairs);
   var coins=(d.coins&&d.coins.length)?d.coins:(d.symbols||[]).map(function(x){return {symbol:x,strategy:'smc'}});
@@ -425,6 +429,56 @@ class Dashboard:
         uptime = _fmt((now_utc - bot.process_start).total_seconds())
         trading_since = _fmt((now_utc - bot.start_time.replace(tzinfo=timezone.utc)).total_seconds())
 
+        # Liveness: без этого тишина неотличима от поломки. «signals: 0» сам
+        # по себе не значит ничего — нужно знать, что бары реально
+        # оценивались и пульс живой.
+        beat = {}
+        health = "ok"
+        health_note = ""
+        try:
+            if bot.redis:
+                m = bot.redis.load_meta() or {}
+                beat = m.get("beat") or {}
+        except Exception:
+            pass
+        if beat:
+            bsym = beat.get("symbols") or {}
+            ages = [now_utc.timestamp() - v.get("last_cycle", 0)
+                    for v in bsym.values() if v.get("last_cycle")]
+            worst_age = max(ages) if ages else None
+            bars_total = int(beat.get("bars_evaluated_total", 0))
+            sig_ts = float(beat.get("last_signal_ts") or 0)
+            quiet_h = (now_utc.timestamp() - sig_ts) / 3600 if sig_ts else None
+            errs = [f"{k}: {v.get('last_error')}" for k, v in bsym.items()
+                    if v.get("last_error")]
+            if worst_age is None:
+                health, health_note = "unknown", "нет данных о пульсе"
+            elif worst_age > bot.STALE_CYCLE_SEC:
+                health = "stalled"
+                health_note = f"цикл молчит {worst_age / 60:.0f} мин"
+            elif errs:
+                health, health_note = "degraded", errs[0]
+            elif bars_total == 0:
+                health, health_note = "unknown", "ещё ни одного бара не оценено"
+            elif quiet_h is not None and quiet_h >= bot.STALE_SIGNAL_CRIT_H:
+                health = "quiet"
+                health_note = f"{quiet_h / 24:.1f} дн без сигнала при живом пульсе"
+            elif quiet_h is not None and quiet_h >= bot.STALE_SIGNAL_WARN_H:
+                health = "quiet"
+                health_note = f"{quiet_h / 24:.1f} дн без сигнала"
+            beat = {
+                "bars_evaluated_total": bars_total,
+                "last_cycle_age_min": round(worst_age / 60, 1) if worst_age else None,
+                "quiet_hours": round(quiet_h, 1) if quiet_h else None,
+                "symbols": {k: {"bars_evaluated": v.get("bars_evaluated", 0),
+                                "last_cycle_age_min": round(
+                                    (now_utc.timestamp() - v.get("last_cycle", 0)) / 60, 1),
+                                "last_error": v.get("last_error", "")}
+                            for k, v in sorted(bsym.items())},
+            }
+        else:
+            health, health_note = "unknown", "пульс ещё не записан (старый бот)"
+
         # Logs
         logs = []
         log_file = Path(__file__).parent.parent / "logs" / "bot.log"
@@ -501,6 +555,9 @@ class Dashboard:
                     "%Y-%m-%d %H:%M UTC"),
                 "legacy_trades": legacy,
                 "strategy": current_strategy,
+                "health": health,
+                "health_note": health_note,
+                "beat": beat,
                 "time": now_utc.strftime("%H:%M:%S UTC"),
             },
             "positions": positions,

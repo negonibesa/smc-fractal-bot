@@ -558,6 +558,18 @@ class SMCFractalBot:
         # Key: (symbol, strategy) → candle timestamp
         self.last_signal_candle = {}
 
+        # Liveness observability. Молчание должно быть доказуемым, а не
+        # предполагаемым: без этих полей «рынок в рейндже» и «бот завис»
+        # выглядят в логах одинаково — пусто.
+        #   last_cycle       — цикл дошёл до конца (свечи получены)
+        #   bars_evaluated   — сколько баров реально прошло через process_candle
+        #   last_bar_ts      — таймстемп последней оценённой свечи
+        #   last_error       — последняя ошибка цикла по символу
+        self.beat = {}          # symbol → dict
+        self.last_signal_ts = 0.0   # epoch последнего сигнала (любого)
+        self._stale_warned = {}     # symbol → уровень уже выведенного варнинга
+
+
         # Per-strategy signal counters (persisted to Redis meta)
         self.strategy_signals = {'smc': 0, 'zdev': 0, 'donchian': 0}
         if self.redis:
@@ -820,6 +832,80 @@ class SMCFractalBot:
             logger.warning(f"DONCHIAN TRAIL FAILED {symbol}: "
                            f"exchange rejected SL {new_stop:.6f}")
 
+    # ─── Liveness observability ───────────────────────────────────────
+    # Порог «цикл считается мёртвым»: бодрится каждые 5 минут (main loop),
+    # поэтому 40 мин = 8 пропущенных проверок. Раньше этого ждать нельзя —
+    # иначе зависший бот обнаружится только на следующей границе 4H.
+    STALE_CYCLE_SEC = 2400
+    # Ожидаемая частота пула10 — 61 сделка/мес ≈ 2.0/день (h27_monthly).
+    # 3 суток тишины = 6 ожидаемых сделок, P(0) ≈ 0.25%.
+    # 7 суток = 14 ожидаемых, P(0) ≈ 8e-7. Это уже не «рынок тихий».
+    STALE_SIGNAL_WARN_H = 72
+    STALE_SIGNAL_CRIT_H = 168
+
+    def _save_beat(self):
+        """Пульс и счётчики оценок → smc:meta (для дашборда)."""
+        if not self.redis:
+            return
+        try:
+            meta = self.redis.load_meta() or {}
+            now = time.time()
+            bars = sum(v.get('bars_evaluated', 0) for v in self.beat.values())
+            meta['beat'] = {
+                'ts': now,
+                'bars_evaluated_total': bars,
+                'last_signal_ts': self.last_signal_ts,
+                'symbols': self.beat,
+            }
+            self.redis.save_meta(meta)
+        except Exception as e:
+            logger.debug(f"beat save failed: {e}")
+
+    def _check_stale_signals(self):
+        """Тишина при живом пульсе = рынок в рейндже. Иначе — алерт.
+
+        Молчание само по себе не авария: при 14 сделках/неделю две недели
+        без входа имеют вероятность ~7e-13. Но ЗДЕСЬ интересует обратное —
+        если пульс мёртв, «рынок тихий» уже не оправдание, а диагноз.
+        """
+        now = time.time()
+        dead = [s for s, v in self.beat.items()
+                if now - v.get('last_cycle', 0) > self.STALE_CYCLE_SEC]
+        if dead:
+            lvl = 'critical' if self._stale_warned.get('__cycle__') != 'critical' else None
+            if lvl:
+                self._stale_warned['__cycle__'] = 'critical'
+                logger.critical(
+                    f"STALLED: цикл не отвечает >{self.STALE_CYCLE_SEC // 60} мин "
+                    f"для {len(dead)}/{len(self.symbols)} символов: {sorted(dead)[:5]}"
+                    f" — это поломка, а не тихий рынок"
+                )
+        else:
+            self._stale_warned.pop('__cycle__', None)
+
+        if dead:
+            return
+        for s in self.symbols:
+            b = self.beat.get(s)
+            if not b or b.get('bars_evaluated', 0) == 0:
+                continue
+            quiet_h = (now - self.last_signal_ts) / 3600 if self.last_signal_ts else None
+            if quiet_h is None or quiet_h < self.STALE_SIGNAL_WARN_H:
+                continue
+            crit = quiet_h >= self.STALE_SIGNAL_CRIT_H
+            key = f'sig_{s}'
+            if self._stale_warned.get(key) == 'critical' and crit:
+                continue
+            if self._stale_warned.get(key) == 'warn' and not crit:
+                continue
+            self._stale_warned[key] = 'critical' if crit else 'warn'
+            ev = b.get('bars_evaluated', 0)
+            msg = (f"QUIET {quiet_h / 24:.1f} дн без сигнала по пулу, пульс живой: "
+                   f"{s} оценено {ev} баров, последний {b.get('last_bar_ts', 0):.0f}. "
+                   f"При 2.0 сделках/день это аномалия, а не рейндж — проверить "
+                   f"cap/маржу/can_trade")
+            (logger.critical if crit else logger.warning)(msg)
+
     def fetch_candles(self, symbol: str, interval: str = "240", limit: int = 200) -> pd.DataFrame:
         """Получить свежие свечи."""
         
@@ -992,6 +1078,15 @@ class SMCFractalBot:
         if df.empty or len(df) < 25:
             return
         
+        # Пульс: дошли до обработки — свечи получены, цикл живой.
+        b = self.beat.setdefault(symbol, {'last_cycle': 0.0, 'bars_evaluated': 0,
+                                          'last_bar_ts': 0.0, 'last_error': ''})
+        try:
+            b['last_cycle'] = time.time()
+            b['last_error'] = ''
+        except Exception as e:
+            logger.debug(f"beat touch failed {symbol}: {e}")
+        
         # 2. Синхронизировать позицию
         self.sync_position(symbol, df)
         
@@ -1162,11 +1257,21 @@ class SMCFractalBot:
                 return
 
             sig = sig_gen.process_candle(df, candle_idx)
+            # Телеметрия не имеет права ломать торговлю. Здесь уже стоял
+            # TypeError (float() от pandas Timestamp), который вылетал ДО
+            # `if sig:` и молча ронял сигнал. Поэтому весь блок под try.
+            try:
+                b['bars_evaluated'] += 1
+                b['last_bar_ts'] = candle_ts.timestamp()
+            except Exception as e:
+                logger.debug(f"beat update failed {symbol}: {e}")
             if strat_type == 'smc':
                 self._save_signal_state(symbol)
 
             if sig:
                 self.last_signal_candle[dedup_key] = candle_ts
+                self.last_signal_ts = time.time()
+                self._stale_warned.pop(symbol, None)
                 direction = sig['direction']
                 entry = sig['entry']
                 stop = sig['stop']
@@ -1377,6 +1482,18 @@ class SMCFractalBot:
                 except Exception as e:
                     logger.error(f"Cycle error {symbol}: {e}", exc_info=True)
                     self.notifier.send_error(str(e), f"Cycle {symbol}")
+                    b = self.beat.setdefault(symbol, {'last_cycle': 0.0, 'bars_evaluated': 0,
+                                                      'last_bar_ts': 0.0, 'last_error': ''})
+                    try:
+                        b['last_error'] = f"{type(e).__name__}: {e}"
+                    except Exception:
+                        pass
+
+            # Пульс в Redis — один раз за цикл, не на каждый символ.
+            # Именно это отличает «тихо, потому что рынок в рейндже» от
+            # «тихо, потому что бот не работает».
+            self._save_beat()
+            self._check_stale_signals()
             
             # Daily report at 00:10 UTC, weekly on Sunday
             # Wrapped in try/except so a failure (e.g. Telegram unreachable,

@@ -18,6 +18,7 @@ build/
 # вместе с отчётами из backtest_results. Исключаются только одноразовые скрипты.
 test_*.py
 check_*.py
+!check_open_positions.py
 backtest_compare.py
 Read.txt
 read2.txt

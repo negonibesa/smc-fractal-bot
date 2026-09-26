@@ -143,22 +143,27 @@ class OrderExecutor:
             
             # 5. Ставим SL + TP
             sl_str = self._round_price(stop, inst['tick_size'])
-            tp_str = self._round_price(tp, inst['tick_size'])
             opposite_side = "Sell" if side == "Buy" else "Buy"
+            # tp=None → стратегия без фиксированного TP (Donchian): выход только
+            # по трейлинг-стопу и time-stop. set_trading_stop опускает takeProfit
+            # при None, поэтому Bybit не получает лишний параметр.
+            tp_str = (self._round_price(tp, inst['tick_size'])
+                      if tp is not None else None)
 
-            # Validate TP vs current price
-            current_price = float(self.client.get_ticker(symbol).get('lastPrice', 0))
-            if side == "Buy" and current_price > 0:
-                min_tp = current_price * 1.001  # 0.1% above current
-                if float(tp_str) < min_tp:
-                    tp_str = self._round_price(min_tp, inst['tick_size'])
-                    logger.info(f"TP adjusted for BUY: {tp_str} (was below current {current_price})")
-            elif side == "Sell" and current_price > 0:
-                max_tp = current_price * 0.999  # 0.1% below current
-                if float(tp_str) > max_tp:
-                    tp_str = self._round_price(max_tp, inst['tick_size'])
-                    logger.info(f"TP adjusted for SELL: {tp_str} (was above current {current_price})")
-            
+            # Validate TP vs current price (только если TP задан)
+            if tp_str is not None:
+                current_price = float(self.client.get_ticker(symbol).get('lastPrice', 0))
+                if side == "Buy" and current_price > 0:
+                    min_tp = current_price * 1.001  # 0.1% above current
+                    if float(tp_str) < min_tp:
+                        tp_str = self._round_price(min_tp, inst['tick_size'])
+                        logger.info(f"TP adjusted for BUY: {tp_str} (was below current {current_price})")
+                elif side == "Sell" and current_price > 0:
+                    max_tp = current_price * 0.999  # 0.1% below current
+                    if float(tp_str) > max_tp:
+                        tp_str = self._round_price(max_tp, inst['tick_size'])
+                        logger.info(f"TP adjusted for SELL: {tp_str} (was above current {current_price})")
+
             sl_tp_ok = True
             try:
                 self.client.set_trading_stop(
@@ -168,7 +173,7 @@ class OrderExecutor:
                     sl_trigger_by="LastPrice",
                     tp_trigger_by="LastPrice",
                 )
-                logger.info(f"SL={sl_str} TP={tp_str}")
+                logger.info(f"SL={sl_str} TP={tp_str if tp_str else '—'}")
             except Exception as e:
                 logger.warning(f"SL/TP via set_trading_stop failed, using conditional: {e}")
                 try:
@@ -212,7 +217,10 @@ class OrderExecutor:
             )
         except Exception as e:
             logger.error(f"Conditional SL failed: {e}")
-        
+
+        if tp_str is None:
+            return
+
         try:
             self.client.place_conditional_order(
                 symbol, close_side, qty_str,

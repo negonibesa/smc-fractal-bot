@@ -1,27 +1,60 @@
 # SMC Fractal Bot — Project Context
 
 ## What
-SMC fractal trading bot for Bybit Demo Trading. 4H candles, sweep→center→return logic. Production strategy is **ZDev A 2.0** (z-score order-flow entry, not SMC). 6 coins live: ADAUSDT, NEARUSDT, ARBUSDT, SOLUSDT, DOGEUSDT, XRPUSDT.
+Trading bot for Bybit Demo Trading, 4H candles. Production strategy is **Donchian 20** (20-bar channel breakout + ATR trailing). 10 coins live. `smc` and `zdev` paths remain in the code but are not live.
+
+## Live Strategy → Donchian 20 (validated H24–H26)
+```
+entry:     close beyond 20-bar Donchian channel, fill at next bar open
+stop:      2.0 x ATR(20) at entry, ATR frozen at entry (no recalc)
+trailing:  stop follows the extreme by 2 x ATR_entry
+time-stop: 30 bars, exit at close
+TP:        none (exit is stop or time-stop only)
+risk:      0.35% of full equity per trade, sized = equity*risk/(2*ATR)
+cap:       max 6 concurrent positions portfolio-wide
+halt:      20% drawdown (the only circuit breaker)
+costs:     taker 0.055% + slippage 0.015%/side = 0.14% round-trip
+```
+Pool 10: `ADA ARB DOGE ENA HBAR LINK NEAR SUI XLM XRP`
+
+H26 result (risk 0.35%, cap 6): 1827 trades, expectancy +0.1690R, WR 42.3%, PF 1.488,
+exposure 19.8%, max DD 13.0%. MC (3000 iters): return p5 74.6% / med 179.9% / p95 370.8%,
+DD p95 15.5%, P(DD>30%)=0.0%. vs pool14: expR 0.121→0.169, PF 1.34→1.49, DD p95 20.7%→15.5%.
+
+Removed in H25 as unprofitable after costs (netR): SOL -0.023, TON -0.003, APT 0.001, ETH 0.047.
+XMR/LTC/BTC not reinstated (netR -0.134 / 0.013 / 0.010).
+
+⚠️ Pool selection and all tuning are **in-sample** on 2024-04..2026-09, the same data
+reused across H20–H26. No funding, no adverse selection, no bear-market stress. 2026 is
+the weakest year (pool10: +18.6%, DD 13.0%).
 
 ## VPS
-- **IP:** 161.104.18.192, root, pass `gC8Bk6zHdgPGa5hT`
+- **IP:** 161.104.18.192, root — пароль в `SSH_PASSWORD` (в репозитории не хранится)
 - **Docker:** `docker exec smc-bot bash`, files in `/app/`
 - **Deploy:** SCP to `/opt/smc-fractal-bot/`, then `docker cp` into container
 - **Persistent:** Docker container NOT persistent — code changes via `docker cp` only, rebuild needed for permanence
 
-## API Keys
-- Bybit Demo: `REDACTED_BY_HISTORY_REWRITE` / `REDACTED_BY_HISTORY_REWRITE`
-- Endpoint: `https://api-demo.bybit.com` (NOT api.bybit.com)
-- Telegram: bot `8372883117:AAGa7tg8LYmWYDG5Dj-7VGFFoazxFQSzoEA`, chat `266366821` (blocked by Oracle Cloud network)
+## Secrets
+Все секреты передаются через переменные окружения, в репозитории не хранятся:
+`BYBIT_API_KEY`, `BYBIT_API_SECRET`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`,
+`DASH_PASS`, `SSH_PASSWORD`. Локально — `.env` (в `.gitignore`), в контейнере —
+`docker-compose` env. Бот читает их через `os.getenv` (`main.py:410-440`).
 
-## Strategy
+🚨 **Bybit API key/secret were hardcoded in `scripts/sync_trades.py` and are still in git
+history** (commits `257415e`, `122f035`). The file now uses `os.getenv`, but the key must be
+rotated and history rewritten if the repo is ever public.
+
+- Bybit Demo endpoint: `https://api-demo.bybit.com` (NOT api.bybit.com)
+- Telegram: токен и chat_id в `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` (канал заблокирован сетью Oracle Cloud, уведомления выключены)
+
+## Strategy (legacy, not live)
 - Sweep liquidity → find consolidation center → enter on return
 - `tp_mode: 'structure'` — TP at body center of pivot candle (opposite-color before impulse)
 - `r_multiple` — fallback if no pivot found (default 1.0R)
 - `breakeven_at: 0.3` — move SL to entry after 0.3R profit
 - H/L center (`use_body=False`) — validated by 2x2 A/B test: H/L PF=1.41 vs Body PF=0.95
 
-## Live Config → ZDev A 2.0 (одно «окно», все 6 монет)
+## Legacy ZDev A 2.0 (снят с боевого, остаётся в коде)
 ```
 baseline:     3 / 5.0с
 zdev_signal: 0.5R / 4h (1H не берём — PF падает, шум)
@@ -38,28 +71,31 @@ XRPUSDT  PF 3.07 / +314% / DD 9.8 / WF 4/6
 Выбыли на этапе скрининга/WF (не в бою): ETH (WF 3/6), SUI (DD 10.5%),
 INJ/GRAM/AVAX/GRAM(листинг)/SUI/BTC/ATOM (DD/WF — не прошли), BTC/ETH — SMC больше не используется.
 
-## Key Parameters (settings.yaml)
+## Key Parameters (config/settings.donchian_pool10.yaml)
 ```
-ADAUSDT: lb=12, sw=0.008, prox=0.012, tp=1.0, timeout=15, adx=25
-NEARUSDT: lb=12, sw=0.008, prox=0.012, tp=1.0, adx=25
-ARBUSDT: lb=12, sw=0.008, prox=0.012, tp=1.0, adx=25
-SOLUSDT: lb=12, sw=0.008, prox=0.012, tp=1.0, adx=25
-DOGEUSDT: lb=12, sw=0.008, prox=0.012, tp=1.0, adx=25
-XRPUSDT: lb=12, sw=0.008, prox=0.012, tp=1.0, adx=25
+все 10 монет: lb=20, ATR=20, trail=2.0x, max_bars=30, risk=0.35%, no TP
+portfolio:   max_concurrent_positions=6, max_drawdown=20%, commission_haircut=0.0
 ```
+Бот читает **жёстко** `config/settings.yaml` (`load_config()`, `main.py:66`). Чтобы
+переключить пул — заменить этот файл (бэкап рядом) либо добавить override пути.
 
 ## Architecture
-- `main.py` — main loop, SignalGenerator with tp_mode support
+- `main.py` — main loop; `SMCFractalBot`; dispatch по `strategy_type` (smc/zdev/donchian)
+- `core/donchian_breakout.py` — DonchianConfig / DonchianSignalGenerator / DonchianExit
+  / `position_size` / `DrawdownHalt`. Ядро новой live-стратегии.
 - `smc_features.py` — find_pivot_candle, find_structure_tp, find_consolidation_center (H/L default)
 - `core/bybit_client.py` — API client, _sync_time before every signed request
-- `core/order_executor.py` — maxMktOrderQty for market orders
-- `core/position_tracker.py` — trailing stop logic
-- `core/risk_manager.py` — dynamic risk, max_consecutive_losses resets on win OR day change
+- `core/order_executor.py` — maxMktOrderQty, optional TP (None для Donchian)
+- `core/position_tracker.py` — trailing stop, time-stop, Donchian state (extreme/atr_entry)
+- `core/risk_manager.py` — sizing; `commission_haircut` = 0 для паритета с H24
 - `core/redis_store.py` — pipeline atomicity, key prefix `smc:`
 - `core/auto_optimizer.py` — PF drop bypasses cooldown
 - `core/dashboard.py` — Flask web dashboard on port 80
 - `backtest.py` — margin-based, SHORT fixed, commission+slippage, max_leverage=10
 - `rolling_optimize.py` — PARAM_RANGES includes tp_mode, structure_tp_lookback
+- `verify_donchian_parity.py` — 85 проверок: паритет с H24 + регрессия smc/zdev
+  + cap-6 + трейлинг + конфиг. Запуск: `python verify_donchian_parity.py`
+- `h24_unified_cost.py` / `h25_per_coin.py` / `h26_pool_check.py` — портфельные расчёты
 
 ## A/B Test Results (ETH, 4H, rolling WF)
 | Config | PF | Return | DD |
@@ -77,9 +113,10 @@ XRPUSDT: lb=12, sw=0.008, prox=0.012, tp=1.0, adx=25
 
 ## Financials
 - Start equity: $171,827 → сброшен рестартом на $166,242.48 (demо-рестарт 2026-09-23, RESTORE)
-- Current equity: $166,242.48 (6 монет zdev, демо, старт боевого пула)
-- **6 coins live (все zdev):** ADAUSDT, NEARUSDT, ARBUSDT, SOLUSDT, DOGEUSDT, XRPUSDT
-- Dynamic risk: base_risk=1.5 (overrides risk_percent=1.0)
+- Current equity: $166,242.48 (10 монет donchian, демо, старт боевого пула)
+- **10 coins live (все donchian):** ADAUSDT, ARBUSDT, DOGEUSDT, ENAUSDT, HBARUSDT,
+  LINKUSDT, NEARUSDT, SUIUSDT, XLMUSDT, XRPUSDT
+- Risk: статический 0.35% от equity; `dynamic_risk` выключен (H23 провалил prereg)
 - Сделки/пары мониторятся через dashboard (http://161.104.18.192, порт 80) и `docker logs smc-bot`
 
 ## DO NOT
@@ -87,3 +124,6 @@ XRPUSDT: lb=12, sw=0.008, prox=0.012, tp=1.0, adx=25
 - Use `api.bybit.com` — demo needs `api-demo.bybit.com`
 - Run Bybit API calls locally from Windows — geo-blocked
 - Use `&&` in SSH commands on Windows PowerShell — use `;` instead
+- Trailing ДО `check_exits` — стоп успеет подняться до high текущего бара и закроет
+  позицию выше нужного (lookahead, ломает паритет). Проверка `verify_donchian_parity.py`
+  ловит это сравнением позиций в `main.py`.

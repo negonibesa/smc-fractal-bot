@@ -45,35 +45,9 @@ def _unauthorized_response() -> Response:
     )
 
 
-def _signals_log_path() -> Path:
-    return Path(__file__).parent.parent / "logs" / "strategy_signals.jsonl"
-
-
-def _signal_counts_from_log() -> dict:
-    """Count signals per strategy from strategy_signals.jsonl (fallback for older code without bot.strategy_signals)."""
-    counts = {"smc": 0, "zdev": 0}
-    path = _signals_log_path()
-    if not path.exists():
-        return counts
-    try:
-        for ln in path.read_text(encoding="utf-8", errors="ignore").splitlines():
-            try:
-                ev = json.loads(ln)
-            except Exception:
-                continue
-            if not isinstance(ev, dict) or 'symbol' not in ev:
-                continue
-            st = ev.get("strategy", "smc")
-            if st in counts:
-                counts[st] += 1
-    except Exception:
-        pass
-    return counts
-
-
 def _recent_signal_events(limit: int = 15) -> list:
     """Recent signals for both SMC and ZDev, read from strategy_signals.jsonl."""
-    path = _signals_log_path()
+    path = Path(__file__).parent.parent / "logs" / "strategy_signals.jsonl"
     if not path.exists():
         return []
     events = []
@@ -135,6 +109,11 @@ h1{color:#00ff88;font-size:20px;margin-bottom:4px}
 .tag.sideways{background:#ffaa0022;color:#ffaa00}
 .tag.smc{background:#ffaa0022;color:#ffaa00;border:1px solid #ffaa0044}
 .tag.zdev{background:#4488ff22;color:#4488ff;border:1px solid #4488ff44}
+.tag.donchian{background:#00dd8822;color:#00dd88;border:1px solid #00dd8844}
+.chip{display:inline-block;padding:3px 10px;border-radius:999px;margin-right:8px;font-size:12px;font-weight:bold;white-space:nowrap}
+.chip-p{background:#00ff8822;color:#00ff88;border:1px solid #00ff8844}
+.chip-n{background:#ff444422;color:#ff4444;border:1px solid #ff444444}
+.chip-z{background:#222228;color:#888;border:1px solid #333}
 table{width:100%;border-collapse:collapse}
 th{text-align:left;color:#666;font-size:11px;text-transform:uppercase;padding:4px 8px;border-bottom:1px solid #333}
 td{padding:4px 8px;border-bottom:1px solid #1a1a1a}
@@ -148,7 +127,10 @@ td{padding:4px 8px;border-bottom:1px solid #1a1a1a}
 </style>
 </head>
 <body>
-<h1>⚡ SMC Fractal Bot</h1>
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+  <h1>⚡ SMC Fractal Bot</h1>
+  <a href="http://161.104.18.192:8080" target="_blank" rel="noopener" style="color:#666;font-size:11px;text-decoration:none;border-bottom:1px dashed #333;padding-bottom:1px">🖥 Monitor</a>
+</div>
 <div class="subtitle" id="meta">Loading...</div>
 
 <div class="grid">
@@ -176,11 +158,6 @@ td{padding:4px 8px;border-bottom:1px solid #1a1a1a}
     <h2>🛡️ Risk</h2>
     <div id="risk">--</div>
   </div>
-</div>
-
-<div class="card" style="margin-bottom:16px">
-  <h2>🎯 Strategies (SMC vs ZDev)</h2>
-  <div id="strategies">--</div>
 </div>
 
 <div class="card" style="margin-bottom:16px">
@@ -216,10 +193,13 @@ function renderStatus(d){
   var coins=(d.coins&&d.coins.length)?d.coins:(d.symbols||[]).map(function(x){return {symbol:x,strategy:'smc'}});
   if(coins.length){
     var cs=coins.map(function(c){
-      var st=c.strategy||'smc';
-      return '<span style="margin-right:10px;white-space:nowrap">'+c.symbol+' <span class="tag '+st+'">'+st.toUpperCase()+'</span></span>';
+      var p=c.pnl||0;
+      var cls=p>0?'chip-p':(p<0?'chip-n':'chip-z');
+      var sign=p>0?'+':(p<0?'-':'');
+      var sym=c.symbol.replace(/USDT$/,'');
+      return '<span class="chip '+cls+'">'+sym+'<span style="color:#ffaa00">('+(c.trades||0)+')</span> '+sign+'$'+Math.abs(p).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})+'</span>';
     }).join('');
-    s+=row('Coins',cs);
+    s+='<div class="row"><span class="label">Coins</span></div><div style="text-align:right;padding:4px 0 6px;line-height:2.1">'+cs+'</div>';
   }
   document.getElementById('status').innerHTML=s;
 }
@@ -262,7 +242,7 @@ function renderSignals(d){
   var s='<table><tr><th>Time</th><th>Symbol</th><th>Strat</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th></tr>';
   d.forEach(function(sig){
     var cls=sig.direction==='BUY'?'long':'short';
-    var stcl=sig.strategy==='zdev'?'zdev':'smc';
+    var stcl=(sig.strategy==='zdev'||sig.strategy==='donchian')?sig.strategy:'smc';
     s+='<tr><td>'+sig.time+'</td><td>'+sig.symbol+'</td>'
       +'<td><span class="tag '+stcl+'">'+(sig.strategy||'smc').toUpperCase()+'</span></td>'
       +'<td><span class="tag '+cls+'">'+sig.direction+'</span></td>'
@@ -270,22 +250,6 @@ function renderSignals(d){
   });
   s+='</table>';
   document.getElementById('signals').innerHTML=s;
-}
-
-function renderStrategies(d){
-  var s='<table><tr><th>Strategy</th><th>Coins</th><th>Signals</th><th>Trades</th><th>W/L</th><th>WR</th><th>PF</th><th>PnL $</th></tr>';
-  ['smc','zdev'].forEach(function(k){
-    var v=d[k];
-    if(!v){return}
-    var cls=v.pnl>=0?'green':'red';
-    s+='<tr><td><b>'+(k==='smc'?'SMC':'ZDev')+'</b></td>'
-      +'<td>'+(v.coins&&v.coins.length?v.coins.join(', '):'--')+'</td>'
-      +'<td>'+v.signals+'</td><td>'+v.trades+'</td>'
-      +'<td>'+v.wins+'/'+v.losses+'</td>'
-      +'<td>'+v.win_rate+'%</td><td>'+v.profit_factor+'</td>'
-      +'<td class="val '+cls+'">$'+Number(v.pnl||0).toLocaleString(undefined,{maximumFractionDigits:0})+'</td></tr>';
-  });
-  document.getElementById('strategies').innerHTML=s||'<div style="color:#555">--</div>';
 }
 
 function renderLogs(d){
@@ -303,7 +267,6 @@ function refresh(){
     renderPositions(d.positions);
     renderRegime(d.regime);
     renderRisk(d.risk);
-    renderStrategies(d.strategies);
     renderSignals(d.signals);
     renderLogs(d.logs);
     document.getElementById('meta').innerHTML='Mode: '+d.bot.mode.toUpperCase()+' | Updated: '+d.bot.time+' | Auto-refresh 10s';
@@ -421,35 +384,6 @@ class Dashboard:
             except Exception:
                 pass
 
-        # Per-strategy stats (smc / zdev) from tagged closed trades + signal counters
-        symbol_strategy = getattr(bot, 'symbol_strategy', {}) or {}
-        strategies = {}
-        all_trades = list(getattr(bot.tracker, 'closed_trades', []) or [])
-        sig_counts = getattr(bot, 'strategy_signals', None)
-        if not isinstance(sig_counts, dict) or not sig_counts:
-            sig_counts = _signal_counts_from_log()
-        coins_by_strat = {}
-        for sym, st in symbol_strategy.items():
-            coins_by_strat.setdefault(st, []).append(sym)
-        for name in ('smc', 'zdev'):
-            st = [t for t in all_trades if t.get('strategy', 'smc') == name]
-            n = len(st)
-            wins = [t for t in st if t['pnl'] > 0]
-            losses = [t for t in st if t['pnl'] <= 0]
-            wpnl = sum(t['pnl'] for t in wins)
-            lpnl = abs(sum(t['pnl'] for t in losses))
-            pf = wpnl / lpnl if lpnl > 0 else (0 if wpnl == 0 else 999)
-            strategies[name] = {
-                "coins": coins_by_strat.get(name, []),
-                "signals": sig_counts.get(name, 0),
-                "trades": n,
-                "wins": len(wins),
-                "losses": len(losses),
-                "win_rate": round(len(wins) / n * 100, 1) if n else 0,
-                "profit_factor": round(pf, 2),
-                "pnl": round(sum(t['pnl'] for t in st), 2),
-            }
-
         # Recent signals — unified from strategy_signals.jsonl (SMC + ZDev)
         signals = _recent_signal_events(15)
         if not signals:
@@ -469,6 +403,17 @@ class Dashboard:
                 except Exception:
                     pass
 
+        # Per-coin stats: trades count + PnL (one strategy, no tag needed)
+        closed = list(getattr(bot.tracker, 'closed_trades', []) or [])
+        coins = []
+        for sym in bot.symbols:
+            ct = [t for t in closed if t.get('symbol') == sym]
+            coins.append({
+                "symbol": sym,
+                "trades": len(ct),
+                "pnl": round(sum(t.get('pnl', 0) for t in ct), 2),
+            })
+
         return {
             "account": account,
             "bot": {
@@ -476,8 +421,7 @@ class Dashboard:
                         "testnet" if os.getenv("BYBIT_TESTNET", "false").lower() == "true" else "mainnet",
                 "running": bot.running,
                 "symbols": bot.symbols,
-                "coins": [{"symbol": sym, "strategy": getattr(bot, 'symbol_strategy', {}).get(sym, 'smc') or 'smc'}
-                          for sym in bot.symbols],
+                "coins": coins,
                 "active_pairs": len(bot.symbols),
                 "uptime": uptime,
                 "time": datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
@@ -485,7 +429,6 @@ class Dashboard:
             "positions": positions,
             "regime": regime,
             "risk": risk,
-            "strategies": strategies,
             "signals": signals,
             "logs": logs,
         }
@@ -497,5 +440,5 @@ class Dashboard:
         logger.info(f"Dashboard started on http://0.0.0.0:{self.port}")
 
     def _run(self):
-        logging.getLogger("werkzeug").setLevel(logging.WARNING)
+        logging.getLogger("werkzeug").setLevel(logging.CRITICAL)
         self.app.run(host="0.0.0.0", port=self.port, debug=False, use_reloader=False)

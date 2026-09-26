@@ -26,6 +26,9 @@ from core.reporter import Reporter
 from core.dashboard import Dashboard
 from smc_features import find_consolidation_center, detect_sweep, calculate_adx, find_structure_tp
 from strategies_v2 import StrategiesV2
+from core.donchian_breakout import (
+    DonchianConfig, DonchianSignalGenerator, atr_series,
+)
 
 load_dotenv()
 
@@ -48,7 +51,7 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("bot")
-logging.getLogger("werkzeug").setLevel(logging.WARNING)
+logging.getLogger("werkzeug").setLevel(logging.CRITICAL)
 
 # ─── CLEANUP OLD LOGS ON STARTUP ──────────────────────────────────
 import glob as _glob
@@ -453,6 +456,8 @@ class SMCFractalBot:
             stop_buffer=config['risk']['stop_buffer'],
             redis_store=self.redis,
             max_leverage=config.get('risk', {}).get('max_leverage', 10),
+            commission_haircut=float(
+                config.get('risk', {}).get('commission_haircut', 0.1) or 0.0),
             dynamic_risk_enabled=config.get('dynamic_risk', {}).get('enabled', True),
             base_risk=config.get('dynamic_risk', {}).get('base_risk', 1.5),
             min_risk=config.get('dynamic_risk', {}).get('min_risk', 0.75),
@@ -463,6 +468,10 @@ class SMCFractalBot:
             pf_window=config.get('dynamic_risk', {}).get('pf_window', 20),
         )
         self.executor = OrderExecutor(self.client, self.risk)
+
+        # Глобальный cap одновременных позиций. 0 = без лимита (legacy).
+        self.max_concurrent_positions = int(
+            config.get('risk', {}).get('max_concurrent_positions', 0) or 0)
         self.tracker = PositionTracker(
             redis_store=self.redis,
         )
@@ -568,10 +577,16 @@ class SMCFractalBot:
         # Per-symbol signal generators (must be after self.symbols is defined)
         self.signal_gens = {}
         self.zdev_gens = {}
+        self.donchian_gens = {}
+        self.donchian_cfgs = {}
         for sym in self.symbols:
             strat = self.symbol_strategy.get(sym, 'smc')
             if strat == 'zdev':
                 self.zdev_gens[sym] = ZDevSignalGenerator(symbol=sym)
+            elif strat == 'donchian':
+                dcfg = self._donchian_config_for(sym)
+                self.donchian_cfgs[sym] = dcfg
+                self.donchian_gens[sym] = DonchianSignalGenerator(symbol=sym, cfg=dcfg)
             else:
                 sym_config = {
                     'strategy': self._get_symbol_strategy(sym),
@@ -706,6 +721,88 @@ class SMCFractalBot:
         cfg = self.symbol_configs.get(symbol, {})
         return cfg.get('filters', self.config.get('filters', {}))
     
+    def _cap_allows_entry(self, symbol: str) -> bool:
+        """Глобальный лимит одновременных позиций.
+
+        H24 валидировал пул только при cap=6. Ограничения не было вовсе, и пул
+        из 14 монет мог открыть 14 позиций, каждая посчитана от полной equity —
+        это ломало бы паритет с бэктестом. Поэтому лимит обязателен.
+
+        Возвращает False, если символ уже в позиции (вход не нужен) или портфель
+        заполнен. max_concurrent_positions=0 отключает лимит (legacy SMC/ZDev).
+        """
+        if self.tracker.has_position(symbol):
+            return False
+        if self.max_concurrent_positions <= 0:
+            return True
+        open_n = sum(1 for s in self.symbols if self.tracker.has_position(s))
+        if open_n >= self.max_concurrent_positions:
+            logger.info(
+                f"CAP: {open_n}/{self.max_concurrent_positions} positions open "
+                f"— skip {symbol}")
+            return False
+        return True
+    
+    def _donchian_config_for(self, symbol: str) -> DonchianConfig:
+        """Конфиг Donchian для символа.
+
+        Defaults — валидированные в H24. Переопределение берётся только из
+        секции donchian конфига символа. Отсутствующие ключи НЕ подставляются
+        из global risk/dynamic_risk: те параметры писались под ZDev, и подстановка
+        молча изменила бы стратегию на непротестированную.
+        """
+        raw = self.symbol_configs.get(symbol, {}).get('donchian', {})
+        if not raw:
+            return DonchianConfig()
+        fields = set(DonchianConfig.__dataclass_fields__)
+        unknown = set(raw) - fields
+        if unknown:
+            logger.warning(f"{symbol}: donchian unknown keys ignored: {sorted(unknown)}")
+        kw = {k: v for k, v in raw.items() if k in fields}
+        if 'risk_percent' in kw and not (0 < float(kw['risk_percent']) <= 5):
+            raise ValueError(
+                f"{symbol}: donchian.risk_percent={kw['risk_percent']} вне диапазона (0, 5]")
+        return DonchianConfig(**kw)
+    
+    def _donchian_trailing(self, symbol: str, high: float, low: float):
+        """ATR-трейлинг для Donchian.
+
+        Стоп идёт за экстремумом на расстоянии trail_atr x ATR, зафиксированного
+        на входе. Экстремум и ATR хранятся в Position и уходят в Redis, поэтому
+        рестарт бота не сдвинет стоп относительно бэктеста.
+
+        Вызывается ПОСЛЕ check_exits(): если бы стоп сначала поднялся до нового
+        экстремума, бар, который должен был закрыть позицию, закрыл бы её выше.
+        """
+        pos = self.tracker.get_position(symbol)
+        if not pos or pos.strategy != 'donchian':
+            return
+        if not (pos.atr_entry > 0):
+            logger.warning(f"{symbol}: donchian pos без atr_entry, трейлинг пропущен")
+            return
+        cfg = self.donchian_cfgs.get(symbol) or DonchianConfig()
+        dist = cfg.trail_atr * pos.atr_entry
+        if pos.side == "LONG":
+            pos.extreme = max(pos.extreme or pos.entry_price, high)
+            new_stop = pos.extreme - dist
+            moved = new_stop > pos.stop_price
+        else:
+            pos.extreme = min(pos.extreme or pos.entry_price, low)
+            new_stop = pos.extreme + dist
+            moved = new_stop < pos.stop_price
+        if not moved:
+            return
+        result = self.executor.update_stop_loss(symbol, new_stop)
+        if result.success:
+            pos.stop_price = new_stop
+            pos.trailing_active = True
+            self.tracker._save_position(symbol, pos)
+            logger.info(f"DONCHIAN TRAIL {symbol}: SL → {new_stop:.6f} "
+                        f"(extreme={pos.extreme:.6f}, dist={dist:.6f})")
+        else:
+            logger.warning(f"DONCHIAN TRAIL FAILED {symbol}: "
+                           f"exchange rejected SL {new_stop:.6f}")
+
     def fetch_candles(self, symbol: str, interval: str = "240", limit: int = 200) -> pd.DataFrame:
         """Получить свежие свечи."""
         
@@ -721,7 +818,7 @@ class SMCFractalBot:
         df = df.sort_values("timestamp").reset_index(drop=True)
         return df
     
-    def sync_position(self, symbol: str):
+    def sync_position(self, symbol: str, df: pd.DataFrame = None):
         """Синхронизировать позицию с биржей."""
         pos = self.client.get_position(symbol)
         tracker_pos = self.tracker.get_position(symbol)
@@ -735,11 +832,41 @@ class SMCFractalBot:
             tp = float(pos.get('takeProfit', 0)) if pos.get('takeProfit') else 0
             
             if entry > 0 and size > 0:
-                self.tracker.open_position(
-                    symbol, side, entry, size,
-                    stop=sl if sl else entry * (0.995 if side == "LONG" else 1.005),
-                    tp=tp if tp else entry * (1.01 if side == "LONG" else 0.99)
-                )
+                is_donchian = (self.symbol_strategy.get(symbol, 'smc') == 'donchian')
+                if is_donchian:
+                    # У Donchian фиксированного TP нет. Подставлять entry*1.01
+                    # нельзя: после рестарта появился бы TP, которого никогда
+                    # не было в бэктесте, и сделка закрылась бы не там.
+                    # Настоящие ATR/время входа лежат в Redis — сюда попадает
+                    # только позиция, потерянная вместе с трекером, поэтому
+                    # исходных данных нет и берётся текущий ATR: риск в 1R
+                    # сохраняется, а абсолютный стоп может отличаться.
+                    atr_now = 0.0
+                    if df is not None and len(df) >= 30:
+                        try:
+                            d = self.donchian_cfgs.get(symbol) or DonchianConfig()
+                            atr_now = float(atr_series(
+                                df['high'].to_numpy(float),
+                                df['low'].to_numpy(float),
+                                df['close'].to_numpy(float),
+                                d.atr_period)[-2])
+                        except Exception as e:
+                            logger.warning(f"{symbol}: donchian sync ATR failed: {e}")
+                            atr_now = 0.0
+                    d = self.donchian_cfgs.get(symbol) or DonchianConfig()
+                    fallback = entry - (1 if side == "LONG" else -1) * d.trail_atr * atr_now
+                    self.tracker.open_position(
+                        symbol, side, entry, size, stop=sl if sl else fallback,
+                        tp=None, strategy='donchian',
+                        atr_entry=atr_now, entry_bar_ts=time.time(),
+                        max_bars=d.max_bars,
+                    )
+                else:
+                    self.tracker.open_position(
+                        symbol, side, entry, size,
+                        stop=sl if sl else entry * (0.995 if side == "LONG" else 1.005),
+                        tp=tp if tp else entry * (1.01 if side == "LONG" else 0.99)
+                    )
                 logger.info(f"SYNC: {side} {size} {symbol} @ {entry}")
                 self.sync_fail_count[symbol] = 0
         
@@ -807,6 +934,32 @@ class SMCFractalBot:
             logger.info(f"SYNC CLOSE: {symbol} {exit_reason} PnL={real_pnl:.2f} "
                         f"(entry={tracker_pos.entry_price:.2f} exit={exit_price:.2f})")
     
+    def _realized_from_exchange(self, symbol: str, since_ts: float):
+        """Фактические цена и PnL закрытия с биржи.
+        
+        Возвращает (exit_price, real_pnl) или (None, None), если данных нет.
+        Теоретическая цена SL/TP из check_exits — это допущение бэктеста,
+        фактическое исполнение всегда отличается на проскальзывание.
+        """
+        try:
+            trades = self.client.get_trade_history(symbol, limit=5)
+        except Exception as e:
+            logger.warning(f"Trade history unavailable for {symbol}: {e}")
+            return None, None
+        best = None
+        for t in trades:
+            try:
+                t_qty = float(t.get('execQty', 0))
+                t_price = float(t.get('execPrice', 0))
+                t_pnl = float(t.get('closedPnl', 0))
+                t_time = int(t.get('execTime', 0)) / 1000
+            except (TypeError, ValueError):
+                continue
+            if t_qty > 0 and t_time > since_ts and t_price > 0:
+                best = (t_price, t_pnl)
+                break
+        return best if best else (None, None)
+    
     def run_cycle(self, symbol: str):
         """Один цикл обработки для символа."""
         
@@ -815,13 +968,15 @@ class SMCFractalBot:
         strat_type = self.symbol_strategy.get(symbol, 'smc')
         if strat_type == 'zdev':
             sig_gen = self.zdev_gens.get(symbol)
+        elif strat_type == 'donchian':
+            sig_gen = self.donchian_gens.get(symbol)
         else:
             sig_gen = self.signal_gens.get(symbol, self.signal_gen)
         if df.empty or len(df) < 25:
             return
         
         # 2. Синхронизировать позицию
-        self.sync_position(symbol)
+        self.sync_position(symbol, df)
         
         # 2b. Update 1D trend if trend filter enabled (SMC generators only)
         if strat_type == 'smc' and getattr(sig_gen, 'trend_1d_enabled', False):
@@ -876,18 +1031,43 @@ class SMCFractalBot:
             else:
                 logger.debug(f"REGIME {symbol}: {regime['regime']} (strategy={strat_type}, no params adapt)")
         
-        # 3. Trailing update для открытой позиции
+        # 3. Trailing и выходы для открытой позиции
         if self.tracker.has_position(symbol):
-            last = df.iloc[-1]
-            self.trailing.update(symbol, last['high'], last['low'], last['close'])
-            
-            # Проверить SL/TP
-            exit_result = self.tracker.check_exits(
-                symbol, last['high'], last['low'], last['close']
-            )
+            # Используем ПОСЛЕДНЮЮ ЗАКРЫТУЮ свечу, не текущую.
+            # df.iloc[-1] — формирующийся бар: его high/low provisional,
+            # вброс на откате вызывает ложный выход, которого в бэктесте нет.
+            # Входы уже используют len(df)-2 (см. candle_idx ниже) — выходы
+            # теперь симметричны входу.
+            if len(df) < 2:
+                return
+            closed = df.iloc[-2]
+            bar_ts = pd.Timestamp(closed['timestamp']).timestamp()
+
+            if strat_type == 'donchian':
+                # Порядок критичен и совпадает с бэктестом:
+                # сначала стоп на УЖЕ УСТАНОВЛЕННОМ уровне, потом time-stop,
+                # и только если позиция пережила бар — обновление экстремума.
+                # Иначе стоп, поднятый до high этого же бара, закрыл бы позицию
+                # выше, чем она должна была закрыться (lookahead).
+                exit_result = self.tracker.check_exits(
+                    symbol, closed['high'], closed['low'], closed['close'],
+                    bar_ts=bar_ts,
+                    max_bars=(self.donchian_cfgs.get(symbol)
+                              or DonchianConfig()).max_bars,
+                )
+                if not exit_result:
+                    self._donchian_trailing(symbol, closed['high'],
+                                            closed['low'])
+            else:
+                self.trailing.update(symbol, closed['high'], closed['low'], closed['close'])
+                # Проверить SL/TP
+                exit_result = self.tracker.check_exits(
+                    symbol, closed['high'], closed['low'], closed['close'],
+                    bar_ts=bar_ts, max_bars=None,
+                )
             if exit_result:
                 logger.info(f"EXIT: {symbol} {exit_result['exit_reason']} PnL={exit_result['pnl']:.2f}")
-                self.risk.register_trade(exit_result['pnl'])
+                entry_time = exit_result.get('entry_time', time.time())
                 close_result = self.executor.close_position(symbol)
                 if not close_result.success:
                     logger.error(f"CLOSE FAILED {symbol}: {close_result.message} — position may still be open!")
@@ -896,6 +1076,23 @@ class SMCFractalBot:
                     close_result = self.executor.close_position(symbol)
                     if not close_result.success:
                         logger.critical(f"CLOSE RETRY FAILED {symbol}: {close_result.message} — NAKED RISK")
+
+                # Бэктест предполагает исполнение ровно по SL/TP. На бирже
+                # фактическая цена другая (проскальзывание), поэтому в риск-менеджер
+                # и статистику идёт фактическое значение, а не допущение бэктеста.
+                real_price, real_pnl = self._realized_from_exchange(symbol, entry_time)
+                if real_pnl is not None:
+                    if abs(real_pnl - exit_result['pnl']) > 1e-9:
+                        logger.info(
+                            f"SLIPPAGE {symbol}: assumed {exit_result['pnl']:.4f} "
+                            f"@ {exit_result['exit_price']:.6f} → actual {real_pnl:.4f} "
+                            f"@ {real_price:.6f}"
+                        )
+                    exit_result['pnl'] = real_pnl
+                    exit_result['exit_price'] = real_price
+
+                self.risk.register_trade(exit_result['pnl'])
+                close_result_msg = "ok" if close_result.success else "FAILED"
                 self.last_trade_close[symbol] = time.time()
                 # Persist cooldown to Redis
                 if self.redis:
@@ -910,11 +1107,20 @@ class SMCFractalBot:
                     exit_result['exit_price'], exit_result['pnl'], exit_result['exit_reason'],
                     size=exit_result.get('size', 0)
                 )
+                if not close_result.success:
+                    logger.critical(
+                        f"EXIT {symbol} recorded but exchange close FAILED ({close_result_msg}) "
+                        f"— verify no residual position"
+                    )
         
         # 4. Проверить can_trade
         can, reason = self.risk.can_trade()
         if not can:
             logger.debug(f"Cannot trade {symbol}: {reason}")
+            return
+        
+        # 4b. Глобальный лимит одновременных позиций.
+        if not self._cap_allows_entry(symbol):
             return
         
         # 5. Если нет позиции — ищем сигнал
@@ -949,7 +1155,11 @@ class SMCFractalBot:
                 stop = sig['stop']
                 tp = sig['tp']
 
-                logger.info(f"SIGNAL [{strat_type}]: {direction} {symbol} @ {entry:.2f} SL={stop:.2f} TP={tp:.2f}")
+                logger.info(
+                    f"SIGNAL [{strat_type}]: {direction} {symbol} @ {entry:.2f} "
+                    f"SL={stop:.2f} "
+                    + (f"TP={tp:.2f}" if tp else "TP=—")
+                )
                 self._bump_strategy_signals(strat_type)
                 self._log_signal_event(symbol, strat_type, sig)
 
@@ -965,13 +1175,37 @@ class SMCFractalBot:
                     
                     if size > 0:
                         tracker_side = "LONG" if direction == "BUY" else "SHORT"
-                        self.tracker.open_position(symbol, tracker_side, entry, size, stop, tp,
-                                                   strategy=strat_type)
+                        dcfg = (self.donchian_cfgs.get(symbol)
+                                if strat_type == 'donchian' else None)
+                        self.tracker.open_position(
+                            symbol, tracker_side, entry, size, stop, tp,
+                            strategy=strat_type,
+                            atr_entry=float(sig.get('atr', 0.0)) if dcfg else 0.0,
+                            entry_bar_ts=candle_ts.timestamp() if dcfg else 0.0,
+                            max_bars=dcfg.max_bars if dcfg else 0,
+                        )
                         logger.info(f"OPENED [{strat_type}]: {tracker_side} {size} {symbol} @ {entry:.2f}")
                         self.notifier.send_entry(symbol, direction, entry, stop, tp, size)
                 elif result.success and not result.sl_tp_ok:
-                    logger.error(f"Position opened but SL/TP failed — emergency closed {symbol}")
-                    self.notifier.send_error("SL/TP failed, position auto-closed", f"Entry {symbol}")
+                    # Позиция открыта, но SL/TP не выставились — она ничем не
+                    # защищена. Раньше здесь только писался лог, позиция
+                    # оставалась открытой без стопа. Закрываем немедленно.
+                    logger.error(f"Position opened but SL/TP failed — emergency close {symbol}")
+                    em = self.executor.close_position(symbol)
+                    if not em.success:
+                        logger.error(f"Retry emergency close {symbol}: {em.message}")
+                        time.sleep(1)
+                        em = self.executor.close_position(symbol)
+                        if not em.success:
+                            logger.critical(
+                                f"NAKED RISK {symbol}: SL/TP failed AND emergency close failed "
+                                f"({em.message}) — position is open and unprotected, close manually"
+                            )
+                    self.notifier.send_error(
+                        "SL/TP failed, position auto-closed" if em.success
+                        else f"NAKED RISK {symbol}: close manually",
+                        f"Entry {symbol}"
+                    )
                 else:
                     logger.error(f"Order failed: {result.message}")
                     self.notifier.send_error(result.message, f"Entry {symbol}")
@@ -1084,6 +1318,12 @@ class SMCFractalBot:
             stype = self.symbol_strategy.get(sym, 'smc')
             if stype == 'zdev':
                 logger.info(f"  {sym}: strategy=zdev (Z-Order ≥2σ, dev ≥2 ATR, TP=eq)")
+            elif stype == 'donchian':
+                dcfg = self.donchian_cfgs.get(sym) or DonchianConfig()
+                logger.info(
+                    f"  {sym}: strategy=donchian lb={dcfg.lookback} "
+                    f"ATR({dcfg.atr_period})x{dcfg.trail_atr} time-stop={dcfg.max_bars} "
+                    f"risk={dcfg.risk_percent}% (no fixed TP)")
             else:
                 strat = self._get_symbol_strategy(sym)
                 logger.info(f"  {sym}: strategy=smc lb={strat.get('lookback')} sw={strat.get('sweep_threshold')} "

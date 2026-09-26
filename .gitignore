@@ -14,6 +14,8 @@ dist/
 build/
 
 # Test/debug scripts
+# ВАЖНО: verify_*.py — проверяемые паритеты стратегии, они идут в репозиторий
+# вместе с отчётами из backtest_results. Исключаются только одноразовые скрипты.
 test_*.py
 check_*.py
 backtest_compare.py
@@ -21,5 +23,15 @@ Read.txt
 read2.txt
 
 # Backtest results (large, not needed in repo)
-backtest_results/
+# Исключение: отчёты стратегии и их prereg-регистрации — это доказательная база,
+# без неё результаты невоспроизводимы и неверифицируемы.
+backtest_results/*
+!backtest_results/H23_PREREGISTRATION.md
+!backtest_results/COST_CORRECTION.md
+!backtest_results/donchian_parity.txt
+!backtest_results/h24_unified_cost.txt
+!backtest_results/h25_per_coin.txt
+!backtest_results/h26_pool_check.txt
+!backtest_results/H25_METHOD.md
+!backtest_results/H26_METHOD.md
 bulk_results/

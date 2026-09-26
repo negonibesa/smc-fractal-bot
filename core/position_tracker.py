@@ -10,6 +10,22 @@ from collections import deque
 
 logger = logging.getLogger(__name__)
 
+BAR_SECONDS_4H = 4 * 3600
+
+
+def bars_held(entry_bar_ts: float, bar_ts: float) -> int:
+    """Сколько закрытых 4H-баров прошло с бара входа.
+
+    Считается по времени, а не по счётчику в памяти, чтобы time-stop работал
+    после рестарта бота. Определено здесь, а не импортом из donchian_breakout,
+    чтобы отказ модуля стратегии не уронил PositionTracker, который держит
+    ещё и живые smc/zdev-позиции. Паритет с бэктестом проверяет
+    test_donchian_parity.py.
+    """
+    if not entry_bar_ts or not bar_ts:
+        return 0
+    return int((bar_ts - entry_bar_ts) // BAR_SECONDS_4H)
+
 
 @dataclass
 class Position:
@@ -24,7 +40,14 @@ class Position:
     highest_pnl_risk: float = 0.0
     original_stop: float = 0.0
     trailing_active: bool = False
-    strategy: str = 'smc'  # smc / zdev
+    strategy: str = 'smc'  # smc / zdev / donchian
+    # Donchian: состояние ATR-трейлинга и time-stop. Хранится в Redis, иначе
+    # рестарт бота сбросил бы экстремум и ATR входа и стратегия поехала бы
+    # с другими стопами, чем валидировались в бэктесте.
+    extreme: float = 0.0        # максимум (LONG) / минимум (SHORT) с входа
+    atr_entry: float = 0.0      # ATR, зафиксированный на баре входа
+    entry_bar_ts: float = 0.0   # время закрытия бара входа
+    max_bars: int = 0           # 0 = time-stop выключен
     
     @property
     def risk_unit(self) -> float:
@@ -89,6 +112,10 @@ class PositionTracker:
                     original_stop=p.get('original_stop', p['stop_price']),
                     trailing_active=p.get('trailing_active', False),
                     strategy=p.get('strategy', 'smc'),
+                    extreme=p.get('extreme', p['entry_price']),
+                    atr_entry=p.get('atr_entry', 0.0),
+                    entry_bar_ts=p.get('entry_bar_ts', 0.0),
+                    max_bars=p.get('max_bars', 0),
                 )
                 self.positions[sym] = pos
                 logger.info(f"RESTORE POSITION: {pos.side} {pos.size} {sym} @ {pos.entry_price}")
@@ -120,6 +147,10 @@ class PositionTracker:
                 'original_stop': pos.original_stop,
                 'trailing_active': pos.trailing_active,
                 'strategy': pos.strategy,
+                'extreme': pos.extreme,
+                'atr_entry': pos.atr_entry,
+                'entry_bar_ts': pos.entry_bar_ts,
+                'max_bars': pos.max_bars,
             })
         except Exception as e:
             logger.error(f"Redis save position failed: {e}")
@@ -144,8 +175,13 @@ class PositionTracker:
     
     def open_position(self, symbol: str, side: str, entry: float,
                       size: float, stop: float, tp: float,
-                      strategy: str = 'smc') -> Position:
-        """Зарегистрировать открытие позиции."""
+                      strategy: str = 'smc', atr_entry: float = 0.0,
+                      entry_bar_ts: float = 0.0,
+                      max_bars: int = 0) -> Position:
+        """Зарегистрировать открытие позиции.
+
+        tp=None допустим: у Donchian фиксированного TP нет.
+        """
         pos = Position(
             symbol=symbol,
             side=side,
@@ -156,17 +192,26 @@ class PositionTracker:
             entry_time=time.time(),
             original_stop=stop,
             strategy=strategy,
+            extreme=entry,
+            atr_entry=atr_entry,
+            entry_bar_ts=entry_bar_ts,
+            max_bars=max_bars,
         )
         self.positions[symbol] = pos
         self._save_position(symbol, pos)
-        logger.info(f"TRACK OPEN: {strategy} {side} {size} {symbol} @ {entry} SL={stop} TP={tp}")
+        logger.info(f"TRACK OPEN: {strategy} {side} {size} {symbol} @ {entry} "
+                    f"SL={stop} TP={tp if tp else '—'}")
         return pos
     
     def check_exits(self, symbol: str, high: float, low: float,
-                    close: float) -> Optional[Dict]:
+                    close: float, bar_ts: float = None,
+                    max_bars: int = None) -> Optional[Dict]:
         """
-        Проверить срабатывание SL/TP.
-        
+        Проверить срабатывание SL/TP/time-stop.
+
+        bar_ts и max_bars заполняются только для Donchian. У smc/zdev они
+        остаются None, поэтому поведение этих стратегий не меняется.
+
         Returns:
             dict с результатом если позиция закрыта, иначе None
         """
@@ -176,6 +221,7 @@ class PositionTracker:
         
         exit_price = None
         exit_reason = None
+        has_tp = pos.tp_price is not None and pos.tp_price > 0
         
         if pos.side == "LONG":
             if low <= pos.stop_price:
@@ -186,7 +232,7 @@ class PositionTracker:
                 elif pos.stop_price > pos.original_stop and \
                      abs(pos.stop_price - pos.entry_price) < pos.risk_unit * 0.1:
                     exit_reason = "BREAKEVEN"
-            elif high >= pos.tp_price:
+            elif has_tp and high >= pos.tp_price:
                 exit_price = pos.tp_price
                 exit_reason = "TAKE_PROFIT"
         else:
@@ -198,9 +244,15 @@ class PositionTracker:
                 elif pos.stop_price < pos.original_stop and \
                      abs(pos.entry_price - pos.stop_price) < pos.risk_unit * 0.1:
                     exit_reason = "BREAKEVEN"
-            elif low <= pos.tp_price:
+            elif has_tp and low <= pos.tp_price:
                 exit_price = pos.tp_price
                 exit_reason = "TAKE_PROFIT"
+
+        # Time-stop после стопа: в баре, где сработали оба, приоритет у стопа.
+        if exit_price is None and max_bars and pos.max_bars:
+            if bars_held(pos.entry_bar_ts, bar_ts) >= pos.max_bars:
+                exit_price = close
+                exit_reason = "TIME_STOP"
         
         if exit_price is not None:
             pnl = pos.unrealized_pnl(exit_price)

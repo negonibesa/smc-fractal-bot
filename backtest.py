@@ -49,6 +49,7 @@ def run_backtest(
     original_stop = 0.0
     highest_pnl = 0.0
     margin_used = 0.0
+    risk_amount_e = 0.0
 
     last_trade_time = None  # for cooldown
     daily_pnl = 0.0
@@ -88,7 +89,7 @@ def run_backtest(
     def _close_position(exit_p, reason, current_time):
         nonlocal position, entry_price, stop_price, tp_price, direction
         nonlocal original_stop, highest_pnl, balance, equity, margin_used, peak_equity
-        nonlocal daily_pnl, daily_trades, funding_accrued
+        nonlocal daily_pnl, daily_trades, funding_accrued, risk_amount_e
 
         if direction == 'LONG':
             raw_pnl = position * (exit_p - entry_price)
@@ -106,6 +107,7 @@ def run_backtest(
             'entry_price': entry_price, 'exit_price': exit_p,
             'pnl': pnl, 'direction': direction, 'exit_reason': reason,
             'risk_units': highest_pnl, 'stop_price': original_stop,
+            'risk_amount': risk_amount_e,
         })
 
         position = 0
@@ -262,6 +264,7 @@ def run_backtest(
                 highest_pnl = 0
 
                 risk_amount = equity * (current_risk / 100)
+                risk_amount_e = risk_amount
                 stop_distance = abs(entry_price - stop_price)
                 if stop_distance == 0:
                     continue
@@ -296,6 +299,7 @@ def run_backtest(
                 highest_pnl = 0
 
                 risk_amount = equity * (current_risk / 100)
+                risk_amount_e = risk_amount
                 stop_distance = abs(entry_price - stop_price)
                 if stop_distance == 0:
                     continue

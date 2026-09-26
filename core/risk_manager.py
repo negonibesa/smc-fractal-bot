@@ -39,7 +39,8 @@ class RiskManager:
                  dd_threshold_2: float = 10.0,
                  pf_hot: float = 2.0,
                  pf_window: int = 20,
-                 max_leverage: int = 10):
+                 max_leverage: int = 10,
+                 commission_haircut: float = 0.1):
         """
         Args:
             dynamic_risk_enabled: Включить auto-risk adjustment
@@ -67,6 +68,7 @@ class RiskManager:
         self.commission = commission
         self.slippage = slippage
         self.stop_buffer = stop_buffer
+        self.commission_haircut = commission_haircut
         self.redis = redis_store
         self.max_leverage = max_leverage
         self.current_equity = 0.0  # actual current equity
@@ -205,11 +207,16 @@ class RiskManager:
         if stop_distance == 0:
             return 0
         
-        # Учитываем комиссию × 2 (вход + выход)
-        commission_cost = equity * self.commission * 2
-        net_risk = risk_amount - commission_cost * 0.1  # небольшой запас
+        # H24-паритет: sizing = equity * risk / stop_distance, без вычета
+        # комиссии. Haircut (по умолчанию 0.1 от 2x комиссии) оставлен для
+        # старых SMC/ZDev-конфигов, где он был задуман как «запас»; для
+        # Donchian выставляется 0, иначе live-размер на 0.35% риска был бы
+        # на ~3% меньше валидированного и паритет с бэктестом терялся.
+        if self.commission_haircut:
+            commission_cost = equity * self.commission * 2
+            risk_amount -= commission_cost * self.commission_haircut
         
-        size = net_risk / stop_distance
+        size = risk_amount / stop_distance
         
         # Cap by max_leverage
         if self.max_leverage > 0 and equity > 0:

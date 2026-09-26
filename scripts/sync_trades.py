@@ -1,12 +1,14 @@
-import json, time, requests
+import json, time, requests, os
 from collections import defaultdict
 from urllib.parse import urlencode
 import hmac, hashlib
 import redis
 
-API_KEY = 'REDACTED_BY_HISTORY_REWRITE'
-API_SECRET = 'REDACTED_BY_HISTORY_REWRITE'
-BASE = 'https://api-demo.bybit.com'
+API_KEY = os.getenv('BYBIT_API_KEY', '')
+API_SECRET = os.getenv('BYBIT_API_SECRET', '')
+if not API_KEY or not API_SECRET:
+    raise SystemExit('BYBIT_API_KEY / BYBIT_API_SECRET не заданы в окружении')
+BASE = os.getenv('BYBIT_BASE_URL', 'https://api-demo.bybit.com')
 
 def sign(params, ts):
     param_str = urlencode(sorted(params.items()))

@@ -58,21 +58,31 @@ class TelegramNotifier:
             return False
     
     def send_entry(self, symbol: str, direction: str, entry: float,
-                   stop: float, tp: float, size: float):
-        """Уведомление о входе."""
+                   stop: float, tp: Optional[float], size: float):
+        """Уведомление о входе.
+
+        tp=None у Donchian: тейк-профита у стратегии нет, выход только по
+        стопу или time-stop. Раньше None попадал в арифметику (rr) и в
+        формат строки, и send_entry падал с TypeError — уже ПОСЛЕ того, как
+        позиция открыта и стоп выставлен. В лог уходило ложное
+        «[ERROR] Cycle error», хотя торговля шла штатно.
+        """
         emoji = "🟢" if direction == "BUY" else "🔴"
         risk = abs(entry - stop)
-        rr = risk / abs(tp - entry) if abs(tp - entry) > 0 else 0
-        
+        has_tp = tp is not None
+        rr = (risk / abs(tp - entry)) if has_tp and abs(tp - entry) > 0 else None
+        tp_txt = (f"<code>{tp:.4f}</code>" if has_tp
+                  else "— (нет TP: выход по стопу или time-stop)")
+        rr_txt = f"Risk: {rr:.2f}R\n" if rr is not None else ""
         text = (
             f"{emoji} <b>ENTRY — {symbol}</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"Direction: <b>{direction}</b>\n"
             f"Entry: <code>{entry:.4f}</code>\n"
             f"Stop Loss: <code>{stop:.4f}</code>\n"
-            f"Take Profit: <code>{tp:.4f}</code>\n"
+            f"Take Profit: {tp_txt}\n"
             f"Size: <code>{size:.4f}</code>\n"
-            f"Risk: {rr:.2f}R\n"
+            f"{rr_txt}"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"⏰ {datetime.utcnow().strftime('%H:%M UTC')}"
         )

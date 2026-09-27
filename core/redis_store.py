@@ -124,6 +124,44 @@ class RedisStore:
         data = self.r.lrange(key, -limit, -1)
         return [json.loads(d) for d in data]
 
+    # ─── EQUITY CURVE ──────────────────────────────────────────
+    # Серия точек для графика доходности в дашборде. Главный цикл крутится
+    # каждые 5 минут, но equity меняется только на сделках — 1 точка в час
+    # достаточно, и 4000 точек покрывают ~5.5 месяца демо-торговли.
+    # В Redis, а не в памяти процесса: кривая переживает рестарт контейнера.
+
+    def append_equity(self, ts: float, equity: float,
+                      min_gap: float = 3600.0, max_points: int = 4000) -> bool:
+        """Дописать точку кривой, не чаще чем раз в min_gap секунд.
+
+        Throttle держится на последней записанной точке, а не в памяти
+        вызывающего: иначе рестарт бота дал бы две точки подряд.
+        """
+        key = self._key("equity:curve")
+        last = self.r.lrange(key, -1, -1)
+        if last:
+            try:
+                if ts - float(json.loads(last[0])['ts']) < min_gap:
+                    return False
+            except Exception:
+                pass  # битая точка не должна блокировать запись новых
+        pipe = self.r.pipeline()
+        pipe.rpush(key, json.dumps({"ts": float(ts), "eq": float(equity)}))
+        pipe.ltrim(key, -max_points, -1)
+        pipe.execute()
+        return True
+
+    def load_equity(self, limit: int = 4000) -> list:
+        """Последние точки кривой доходности, старейшие → новейшие."""
+        key = self._key("equity:curve")
+        out = []
+        for d in self.r.lrange(key, -limit, -1):
+            try:
+                out.append(json.loads(d))
+            except Exception:
+                continue
+        return out
+
     # ─── RISK MANAGER STATE ────────────────────────────────────
 
     def save_risk_state(self, state: dict):

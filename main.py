@@ -1575,6 +1575,16 @@ class SMCFractalBot:
                 # Update risk manager with current equity
                 self.risk.update_equity(equity)
 
+                # Кривая доходности для дашборда. Тот же equity, новых вызовов
+                # Bybit не добавляем. Отдельный try/except: падение записи в
+                # Redis не должно превращаться в "Daily/weekly report block
+                # failed" и пропускать ночной отчёт.
+                if self.redis and equity > 0:
+                    try:
+                        self.redis.append_equity(time.time(), equity)
+                    except Exception:
+                        pass
+
                 if now.date() > last_report_day and now.hour == 0 and now.minute < 10:
                     self.reporter.send_daily(equity, self.tracker.positions, self.regime_state)
                     self.risk.reset_daily()

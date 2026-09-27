@@ -154,6 +154,8 @@ td{padding:4px 8px;border-bottom:1px solid #1a1a1a}
 .log-box .info{color:#4488ff}
 .pulse{animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+canvas.eqcurve{width:100%;height:120px;display:block;margin-top:10px;background:#080810;border:1px solid #1a1a1a;border-radius:6px}
+.eqhint{color:#555;font-size:10px;margin-top:5px}
 .footer{text-align:center;color:#333;font-size:10px;margin-top:16px}
 </style>
 </head>
@@ -168,6 +170,8 @@ td{padding:4px 8px;border-bottom:1px solid #1a1a1a}
   <div class="card">
     <h2>💰 Account</h2>
     <div id="account">--</div>
+    <canvas class="eqcurve" id="eqcurve" width="520" height="120"></canvas>
+    <div class="eqhint" id="eqhint">Equity curve: collecting…</div>
   </div>
   <div class="card">
     <h2>⚙️ Bot Status</h2>
@@ -213,6 +217,89 @@ function renderAccount(d){
   s+=row('Available','$'+Number(d.available||0).toLocaleString(undefined,{minimumFractionDigits:2}),'blue');
   s+=row('Unrealized PnL','$'+Number(d.unrealized_pnl||0).toLocaleString(undefined,{minimumFractionDigits:2}),d.unrealized_pnl>=0?'green':'red');
   document.getElementById('account').innerHTML=s;
+}
+
+function drawEquity(curve, startEq){
+  var cv=document.getElementById('eqcurve');
+  var hint=document.getElementById('eqhint');
+  if(!cv) return;
+  var dpr=window.devicePixelRatio||1;
+  var W=cv.clientWidth||520, H=cv.clientHeight||120;
+  cv.width=W*dpr; cv.height=H*dpr;
+  var g=cv.getContext('2d');
+  g.setTransform(dpr,0,0,dpr,0,0);
+  g.clearRect(0,0,W,H);
+
+  // Точек мало или ещё нет — рисуем честную заглушку, а не пустой прямоугольник
+  if(!curve||curve.length<2){
+    g.fillStyle='#333'; g.font='11px monospace'; g.textAlign='center';
+    g.fillText(curve&&curve.length?'1 точка — ждём вторую':'накопление истории…',W/2,H/2);
+    hint.textContent=curve&&curve.length?'1 точка — ждём вторую':'Equity curve: collecting…';
+    return;
+  }
+
+  var t0=curve[0][0], t1=curve[curve.length-1][0];
+  var pad=6, ys=[];
+  for(var i=0;i<curve.length;i++) ys.push(curve[i][1]);
+  var lo=Math.min.apply(null,ys), hi=Math.max.apply(null,ys);
+  // start_equity — реальная точка отсчёта, кривая обязана быть читаема
+  // и когда весь PnL в одном конце шкалы
+  if(startEq>0){ lo=Math.min(lo,startEq); hi=Math.max(hi,startEq); }
+  if(hi-lo<1e-9){ hi=lo+1; lo=lo-1; }  // плоская кривая: не делить на ноль
+  var span=hi-lo, spanT=(t1-t0)||1;
+  var X=function(t){ return pad+(t-t0)/spanT*(W-pad*2); };
+  var Y=function(v){ return H-pad-(v-lo)/span*(H-pad*2); };
+
+  // сетка
+  g.strokeStyle='#16161e'; g.lineWidth=1;
+  for(var k=0;k<=3;k++){
+    var y=pad+k*(H-pad*2)/3;
+    g.beginPath(); g.moveTo(pad,y); g.lineTo(W-pad,y); g.stroke();
+  }
+  // линия стартового капитала
+  if(startEq>0){
+    g.strokeStyle='#ffaa0055'; g.setLineDash([3,3]);
+    g.beginPath(); g.moveTo(pad,Y(startEq)); g.lineTo(W-pad,Y(startEq)); g.stroke();
+    g.setLineDash([]);
+  }
+
+  var last=curve[curve.length-1][1];
+  var up=startEq>0?last>=startEq:last>=curve[0][1];
+  var col=up?'#00ff88':'#ff4444';
+
+  // заливка под линией
+  g.beginPath(); g.moveTo(X(t0),H-pad);
+  for(var j=0;j<curve.length;j++) g.lineTo(X(curve[j][0]),Y(curve[j][1]));
+  g.lineTo(X(t1),H-pad); g.closePath();
+  g.fillStyle=up?'#00ff8818':'#ff444418'; g.fill();
+  // линия
+  g.beginPath();
+  for(var m=0;m<curve.length;m++){
+    var px=X(curve[m][0]), py=Y(curve[m][1]);
+    if(m===0) g.moveTo(px,py); else g.lineTo(px,py);
+  }
+  g.strokeStyle=col; g.lineWidth=1.5; g.stroke();
+  // последняя точка
+  g.fillStyle=col;
+  g.beginPath(); g.arc(X(t1),Y(last),2.5,0,6.284); g.fill();
+
+  // подписи: min/max и период
+  g.font='9px monospace'; g.textAlign='left';
+  g.fillStyle='#555';
+  g.fillText('$'+hi.toLocaleString(undefined,{maximumFractionDigits:0}),pad+2,pad+8);
+  g.fillText('$'+lo.toLocaleString(undefined,{maximumFractionDigits:0}),pad+2,H-pad-3);
+  g.textAlign='right'; g.fillStyle='#444';
+  var days=Math.max(1,Math.round(spanT/86400));
+  g.fillText(days+' дн',W-pad-2,H-pad-3);
+
+  // подпись под графиком: без неё остаётся надпись из заглушки
+  // «1 точка — ждём вторую» навсегда, даже когда криная уже есть
+  var base0=startEq>0?startEq:curve[0][1];
+  var pct=base0>0?((last-base0)/base0*100):0;
+  hint.textContent='Equity: '+curve.length+' pts · '+
+    (startEq>0?('start $'+base0.toLocaleString(undefined,{maximumFractionDigits:0})+' · '):'')+
+    (pct>=0?'+':'')+pct.toFixed(2)+'%';
+  hint.style.color=up?'#00ff88':'#ff4444';
 }
 
 function renderStatus(d){
@@ -305,6 +392,7 @@ function renderLogs(d){
 function refresh(){
   fetch('/api/status').then(r=>r.json()).then(d=>{
     renderAccount(d.account);
+    drawEquity(d.equity_curve, d.start_equity);
     renderStatus(d.bot);
     renderPositions(d.positions);
     renderRegime(d.regime);
@@ -318,6 +406,13 @@ function refresh(){
 
 refresh();
 setInterval(refresh,10000);
+// Канвас не перерисовывается сам при изменении ширины окна — график
+// растягивался бы вместе с битыми пикселями. Перерисовываем на resize.
+window.addEventListener('resize',function(){
+  fetch('/api/status').then(r=>r.json()).then(d=>{
+    drawEquity(d.equity_curve, d.start_equity);
+  }).catch(e=>{});
+});
 </script>
 </body>
 </html>"""
@@ -551,8 +646,21 @@ class Dashboard:
                 "legacy_pnl": round(sum(t.get('pnl', 0) for t in ct_legacy), 2),
             })
 
+        # Кривая доходности для графика в блоке Account
+        curve = []
+        try:
+            if bot.redis:
+                for p in (bot.redis.load_equity() or []):
+                    ts, eq = p.get("ts"), p.get("eq")
+                    if ts is not None and eq is not None:
+                        curve.append([round(float(ts), 1), round(float(eq), 2)])
+        except Exception:
+            pass
+
         return {
             "account": account,
+            "equity_curve": curve,
+            "start_equity": round(float(bot.start_equity or 0), 2),
             "bot": {
                 "mode": "demo" if os.getenv("BYBIT_DEMO", "true").lower() == "true" else
                         "testnet" if os.getenv("BYBIT_TESTNET", "false").lower() == "true" else "mainnet",

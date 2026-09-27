@@ -48,9 +48,27 @@ class DonchianConfig:
     max_concurrent: int = 6
     max_drawdown_halt: float = 20.0
 
+    # ── ER-фильтр входа (H32/H33/H36) ────────────────────────────────
+    # По умолчанию ВЫКЛЮЧЕН: проверен на 2024-04..2026-09 in-sample, и
+    # вопрос «а не попробовать ли ER?» задан на всей выборке. Включается
+    # явно через конфиг, чтобы стратегия не менялась молча.
+    er_filter: bool = False
+    er_period: int = 20
+    er_threshold_window: int = 950
+
     @property
     def risk_fraction(self) -> float:
         return self.risk_percent / 100.0
+
+    @property
+    def warmup_bars(self) -> int:
+        """Сколько баров истории нужно до первого вызываемого сигнала."""
+        base = max(self.lookback, self.atr_period) + 1
+        if not self.er_filter:
+            return base
+        # ER нужен на er_period барах, порог — на окне window. Окно должно
+        # помещаться в доступную историю, поэтому требование суммируется.
+        return max(base, self.er_period + self.er_threshold_window + 2)
 
 
 # ─── индикаторы ────────────────────────────────────────────────────
@@ -92,6 +110,44 @@ def signal_series(close: np.ndarray, high: np.ndarray, low: np.ndarray,
     return sig
 
 
+# ─── ER-фильтр входа (H32/H33/H36) ─────────────────────────────────
+
+def efficiency_ratio(close: np.ndarray, period: int) -> np.ndarray:
+    """Kaufman Efficiency Ratio: |close - close[-period]| / sum|Δclose|.
+
+    ER≈1 — движение почти без откатов (тренд), ER≈0 — рынок топчется
+    на месте (хаос). Первые `period` баров = NaN: истории не хватает.
+
+    Только backward: значение на баре k опирается на бары <= k, поэтому
+    lookahead невозможен по построению (та же гарантия, что у Donchian).
+    """
+    if period < 1:
+        raise ValueError(f"er period must be >= 1, got {period}")
+    close = np.asarray(close, dtype=float)
+    net = np.abs(close - np.roll(close, period))
+    net[:period] = np.nan
+    path = pd.Series(np.abs(np.diff(close, prepend=close[0]))) \
+        .rolling(period).sum().to_numpy()
+    return net / np.where(path > 0, path, np.nan)
+
+
+def er_threshold_at(er: np.ndarray, i: int, window: int) -> Optional[float]:
+    """Медиана ER по окну barов [i-window, i) — СТРОГО до сигнального бара i.
+
+    Скользящая, а не зашитая константа: порог следует за рынком сам и не
+    устаревает. В H36 проверено, что window=950 воспроизводит замороженный
+    train-порог из H33 (expR 0.202 против 0.202, PF 1.609 против 1.604).
+
+    None, если истории не хватает — вызывающий обязан решать, что делать.
+    """
+    lo = max(0, i - window)
+    win = er[lo:i]
+    win = win[~np.isnan(win)]
+    if len(win) < window // 2:
+        return None
+    return float(np.median(win))
+
+
 def position_size(entry: float, atr: float, cfg: DonchianConfig,
                   equity: float) -> float:
     """qty = equity * risk / (trail_atr * atr).
@@ -121,7 +177,7 @@ class DonchianSignalGenerator:
 
     def evaluate(self, df: pd.DataFrame, i: int) -> Optional[dict]:
         """Оценить бар i. Требует минимум lookback+atr_period баров."""
-        warmup = max(self.cfg.lookback, self.cfg.atr_period) + 1
+        warmup = self.cfg.warmup_bars
         if i < warmup or i >= len(df):
             return None
 
@@ -145,6 +201,25 @@ class DonchianSignalGenerator:
         else:
             return None
 
+        # ── ER-фильтр: отбрасываем пробои в хаотичном рынке ─────────
+        # Точка фильтрации та же, что и в бэктесте: на СИГНАЛЬНОМ баре i.
+        # Фильтр НЕ переносит стоп и не трогает выходы — только вход.
+        er_val = th_val = None
+        if self.cfg.er_filter:
+            er_arr = efficiency_ratio(c, self.cfg.er_period)
+            er_val = float(er_arr[i]) if np.isfinite(er_arr[i]) else None
+            th_val = er_threshold_at(er_arr, i, self.cfg.er_threshold_window)
+            if th_val is None or er_val is None:
+                # fail-closed: не смогли оценить режим — не входим. Иначе
+                # при нехватке истории фильтр молча превратился бы в no-op.
+                import logging
+                logging.getLogger(__name__).warning(
+                    f"ER filter: недостаточно истории {self.symbol} "
+                    f"(i={i}, window={self.cfg.er_threshold_window}) — вход пропущен")
+                return None
+            if er_val < th_val:
+                return None
+
         ref = float(close)
         stop = ref - side * self.cfg.trail_atr * atr
         ts = df['timestamp'].iloc[i] if 'timestamp' in df.columns else df.index[i]
@@ -167,6 +242,9 @@ class DonchianSignalGenerator:
                 'atr_period': self.cfg.atr_period,
                 'trail_atr': self.cfg.trail_atr,
                 'max_bars': self.cfg.max_bars,
+                'er_filter': self.cfg.er_filter,
+                'er': er_val,
+                'er_threshold': th_val,
             },
         }
 

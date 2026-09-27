@@ -600,6 +600,9 @@ class SMCFractalBot:
         self.symbol_configs = {}
         self.symbol_strategy = {}  # symbol → 'smc' | 'zdev'
         self.locked_configs = set()  # symbols with lock_config=true — optimizer won't touch
+        # Глобальная секция donchian — дефолт для символов без своей
+        # (сейчас ею включается ER-фильтр на весь пул, см. settings.yaml).
+        self.global_donchian = config.get('donchian', {}) or {}
         for asset in config.get('assets', []):
             if asset.get('enabled', False):
                 sym = asset['symbol']
@@ -789,12 +792,16 @@ class SMCFractalBot:
     def _donchian_config_for(self, symbol: str) -> DonchianConfig:
         """Конфиг Donchian для символа.
 
-        Defaults — валидированные в H24. Переопределение берётся только из
-        секции donchian конфига символа. Отсутствующие ключи НЕ подставляются
-        из global risk/dynamic_risk: те параметры писались под ZDev, и подстановка
-        молча изменила бы стратегию на непротестированную.
+        Defaults — валидированные в H24. Переопределение берётся из секции
+        donchian конфига символа, а если её нет — из глобальной секции
+        `donchian` (так включён ER-фильтр сразу на весь пул). Отсутствующие
+        ключи НЕ подставляются из global risk/dynamic_risk: те параметры
+        писались под ZDev, и подстановка молча изменила бы стратегию
+        на непротестированную.
         """
         raw = self.symbol_configs.get(symbol, {}).get('donchian', {})
+        if not raw:
+            raw = dict(getattr(self, 'global_donchian', {}) or {})
         if not raw:
             return DonchianConfig()
         fields = set(DonchianConfig.__dataclass_fields__)
@@ -1085,7 +1092,14 @@ class SMCFractalBot:
         """Один цикл обработки для символа."""
         
         # 1. Получить свечи
-        df = self.fetch_candles(symbol, interval=CANDLE_INTERVAL, limit=200)
+        # Для Donchian с ER-фильтром нужно 1000 баров: порог = медиана ER за
+        # 950 баров, плюс прогрев. 200 баров хватило бы только на канал, и
+        # фильтр молча fail-closed срезал бы ВСЕ входы. 1000 — лимит Bybit
+        # на один запрос /v5/market/kline, поэтому одного вызова достаточно.
+        strat_type_pre = self.symbol_strategy.get(symbol, 'smc')
+        dcfg_pre = self.donchian_cfgs.get(symbol) if strat_type_pre == 'donchian' else None
+        need = 1000 if (dcfg_pre and dcfg_pre.er_filter) else 200
+        df = self.fetch_candles(symbol, interval=CANDLE_INTERVAL, limit=need)
         strat_type = self.symbol_strategy.get(symbol, 'smc')
         if strat_type == 'zdev':
             sig_gen = self.zdev_gens.get(symbol)
@@ -1095,6 +1109,16 @@ class SMCFractalBot:
             sig_gen = self.signal_gens.get(symbol, self.signal_gen)
         if df.empty or len(df) < 25:
             return
+        # Donchian с ER-фильтром:evaluate() вернёт None (fail-closed), если
+        # баров меньше прогрева. Ловим это здесь, чтобы был один debug вместо
+        # warning'а на каждом цикле каждого символа.
+        if strat_type == 'donchian':
+            dcfg = self.donchian_cfgs.get(symbol) or DonchianConfig()
+            need_bars = dcfg.warmup_bars + 2   # +2: последний бар не закрыт
+            if len(df) < need_bars:
+                logger.debug(f"{symbol}: баров {len(df)} < {need_bars} "
+                             f"для ER-фильтра — вход пропущен")
+                return
         
         # Пульс: дошли до обработки — свечи получены, цикл живой.
         b = self.beat.setdefault(symbol, {'last_cycle': 0.0, 'bars_evaluated': 0,
@@ -1466,10 +1490,14 @@ class SMCFractalBot:
                 logger.info(f"  {sym}: strategy=zdev (Z-Order ≥2σ, dev ≥2 ATR, TP=eq)")
             elif stype == 'donchian':
                 dcfg = self.donchian_cfgs.get(sym) or DonchianConfig()
+                er_note = ''
+                if dcfg.er_filter:
+                    er_note = (f" ER-вход: Kaufman({dcfg.er_period})"
+                               f" >= медиана {dcfg.er_threshold_window} баров")
                 logger.info(
                     f"  {sym}: strategy=donchian lb={dcfg.lookback} "
                     f"ATR({dcfg.atr_period})x{dcfg.trail_atr} time-stop={dcfg.max_bars} "
-                    f"risk={dcfg.risk_percent}% (no fixed TP)")
+                    f"risk={dcfg.risk_percent}%{er_note} (no fixed TP)")
             else:
                 strat = self._get_symbol_strategy(sym)
                 logger.info(f"  {sym}: strategy=smc lb={strat.get('lookback')} sw={strat.get('sweep_threshold')} "

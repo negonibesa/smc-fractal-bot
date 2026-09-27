@@ -30,6 +30,11 @@ LB, ATRN, TRAIL, HOLD = 20, 20, 2.0, 30
 CAPITAL = 166_242.48
 LEV, MARGIN_BUF = 10.0, 0.80
 EXCLUDE_14 = {'XMR', 'LTC', 'BTC'}
+# Кандидаты H29. Лежат в data/raw рядом с боевыми, поэтому load() обязан их
+# отсекать: иначе пересечение индексов схлопнется до начала истории HYPE
+# (2024-12) и ВСЕ легаси-расчёты молча поедут. Включаются только явно.
+NEW_COINS = {'ONDO', 'HYPE', 'BNB', 'TRX', 'RENDER', 'UNI', 'AVAX'}
+POOL_PIN = None      # если задан — ровно этот пул, независимо от data/raw
 CAP = 6
 RISKS = (0.0025, 0.0035, 0.005, 0.0075)
 N_ITER = 3000
@@ -51,7 +56,11 @@ def true_range(o, h, l, c):
 
 
 def load():
-    pool = {f.name.split('_4h')[0] for f in DATA.glob('*_4h*.csv')} - EXCLUDE_14
+    if POOL_PIN is not None:
+        pool = set(POOL_PIN)
+    else:
+        pool = {f.name.split('_4h')[0] for f in DATA.glob('*_4h*.csv')} \
+            - EXCLUDE_14 - NEW_COINS
     data = {}
     for f in sorted(DATA.glob('*_4h*.csv')):
         b = f.name.split('_4h')[0]
@@ -87,9 +96,12 @@ def arrays(d):
 
 
 def run(prep, idx, risk, cap=CAP, size_on='equity', capital=CAPITAL,
-        fee_twice=False):
+        fee_twice=False, entry_mask=None):
     """size_on: 'equity' (риск от полной эквити) | 'cash' (как в H21)
     fee_twice: True воспроизводит баг H21 для оценки масштаба ошибки.
+    entry_mask: {co: bool[j]} — разрешён ли вход по сигналу бара j (H33).
+                 None = без фильтра. Метка берётся на СИГНАЛЬНОМ баре, вход
+                 на следующем, поэтому внутри цикла проверяем j-1.
     """
     n = len(idx)
     coins = sorted(prep)
@@ -102,11 +114,20 @@ def run(prep, idx, risk, cap=CAP, size_on='equity', capital=CAPITAL,
     # разбивки в H27. На существующие метрики не влияет.
     R_bar = []
     R_sym = []
+    R_ei = []
 
     for j in range(n):
         # --- входы на открытии бара
         for co, s in list(pend.items()):
             p = prep[co]
+            if entry_mask is not None:
+                # j — бар входа, метка фильтра — на сигнальном баре j-1.
+                # Отклонённый сигнал ОТМЕНЯЕТСЯ, а не откладывается.
+                k = j - 1
+                ok = (k >= 0 and entry_mask[co][k])
+                if not ok:
+                    pend.pop(co, None)
+                    continue
             ae = p['a'][j]
             if np.isnan(ae) or ae <= 0:
                 continue
@@ -154,6 +175,9 @@ def run(prep, idx, risk, cap=CAP, size_on='equity', capital=CAPITAL,
             R.append(pnl / risk_dollars if risk_dollars > 0 else 0.0)
             R_bar.append(j)
             R_sym.append(co)
+            # бар входа — для разбивки сделок по режиму рынка (H32).
+            # Режим фильтруется ДО входа, поэтому метка нужна на ei, а не на j.
+            R_ei.append(q['ei'])
             del openp[co]
 
         e = cash
@@ -180,7 +204,8 @@ def run(prep, idx, risk, cap=CAP, size_on='equity', capital=CAPITAL,
                 wr=float((R > 0).mean()) if len(R) else np.nan,
                 eq=eq, idx=idx, dd=dd, R=R,
                 R_bar=np.array(R_bar, dtype=int),
-                R_sym=np.array(R_sym, dtype=object))
+                R_sym=np.array(R_sym, dtype=object),
+                R_ei=np.array(R_ei, dtype=int))
 
 
 def mc(R, risk, n_iter=N_ITER, block=BLOCK, seed=SEED):

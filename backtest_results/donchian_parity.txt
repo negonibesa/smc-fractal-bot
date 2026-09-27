@@ -3,7 +3,7 @@
 ============================================================================================
 
   пул 14 монет, 2024-04-02 .. 2026-09-24, 5434 баров
-  конфиг: DonchianConfig(lookback=20, atr_period=20, trail_atr=2.0, max_bars=30, risk_percent=0.35, max_concurrent=6, max_drawdown_halt=20.0)
+  конфиг: DonchianConfig(lookback=20, atr_period=20, trail_atr=2.0, max_bars=30, risk_percent=0.35, max_concurrent=6, max_drawdown_halt=20.0, er_filter=False, er_period=20, er_threshold_window=950)
 
 ============================================================================================
 1. ИНДИКАТОРЫ: модуль против H24
@@ -60,6 +60,50 @@
   [OK  ] resume сбрасывает остановку
 
 ============================================================================================
+4. СИНТАКСИС-GATE (обязателен перед docker cp)
+============================================================================================
+
+  [OK  ] компилируется: main.py
+  [OK  ] компилируется: core/donchian_breakout.py
+  [OK  ] компилируется: core/bybit_client.py
+  [OK  ] компилируется: core/order_executor.py
+  [OK  ] компилируется: core/position_tracker.py
+  [OK  ] компилируется: core/risk_manager.py
+  [OK  ] компилируется: core/redis_store.py
+  [OK  ] main.py импортируется (нет ошибок уровня модуля)
+
+============================================================================================
+7. ER-ФИЛЬТР ВХОДА (H32/H33/H36)
+============================================================================================
+
+  [OK  ] ER-фильтр ВЫКЛЮЧЕН по умолчанию (стратегия не меняется молча)   er_filter=False
+  [OK  ] выключенный фильтр не меняет прогрев   warmup=21
+  [OK  ] прогрев с фильтром = er_period + window + 2   972 vs 972
+  [OK  ] ER совпадает с ручным расчётом Kaufman   max|d|=0.000e+00
+  [OK  ] порог определён при достаточной истории   0.24246800791640588
+  [OK  ] порог = медиана ER[i-window:i], без бара i   0.24246800791640588 vs 0.24246800791640588
+  [OK  ] порог не зависит от значения ER на сигнальном баре
+  [OK  ] порог None при нехватке истории
+  [OK  ] ER на баре i не зависит от будущих баров
+  [OK  ] синтетика даёт сигнальные бары для проверки   216 баров
+  [OK  ] фильтр на сигнальном баре: либо тот же сигнал, либо отсев
+  [OK  ] есть сигналы ниже прогрева фильтра (проверка fail-closed)   177 баров
+  [OK  ] прогрев с фильтром отсекает ранние сигналы (fail-closed)
+  [OK  ] выходы фильтра не трогает (стоп = 2*ATR как в H24)
+  [OK  ] фильтр не меняет risk_percent/max_bars
+  [OK  ] фильтр пропускает сигналы (не fail-closed по всем)   baseline 63, с фильтром 53
+  [OK  ] фильтр режет часть сигналов, но не все   baseline 63, с фильтром 53
+  [OK  ] доля прошедших сигналов 50-100% (как в H33)   осталось 84%
+  [OK  ] settings.yaml: donchian.er_filter = true   {'er_filter': True, 'er_period': 20, 'er_threshold_window': 950}
+  [OK  ] settings.yaml: er_threshold_window = 950   950
+  [OK  ] settings.yaml: er_period = 20
+  [OK  ] порог влезает в лимит Bybit (1000 баров на запрос)   нужно 974
+  [OK  ] settings.yaml: в donchian только ER-ключи   лишние: set()
+  [OK  ] settings.yaml: risk.commission_haircut присутствует и = 0   risk keys=['commission', 'commission_haircut', 'max_concurrent_positions', 'max_consecutive_losses', 'max_daily_loss', 'max_daily_trades', 'max_drawdown', 'max_leverage', 'risk_percent', 'slippage', 'stop_buffer']
+  [OK  ] settings.yaml: risk-блок не потерял ключи H24   risk keys=['commission', 'commission_haircut', 'max_concurrent_positions', 'max_consecutive_losses', 'max_daily_loss', 'max_daily_trades', 'max_drawdown', 'max_leverage', 'risk_percent', 'slippage', 'stop_buffer']
+  [OK  ] settings.yaml: risk_percent = 0.35 (H24-паритет)   0.35
+
+============================================================================================
 4. РЕГРЕССИЯ: smc/zdev не должны измениться
 ============================================================================================
 
@@ -101,8 +145,8 @@
   [OK  ] трейлинг не трогает zdev-позицию
   [OK  ] трейлинг без atr_entry ничего не двигает
   [OK  ] donchian-конфиг: пусто -> валидированные дефолты H24
-  [OK  ] donchian-конфиг: частичный override сохраняет остальные дефолты   DonchianConfig(lookback=40, atr_period=14, trail_atr=2.0, max_bars=30, risk_percent=0.35, max_concurrent=6, max_drawdown_halt=20.0)
-  [OK  ] donchian-конфиг: неизвестный ключ игнорируется, не роняет бота   DonchianConfig(lookback=40, atr_period=20, trail_atr=2.0, max_bars=30, risk_percent=0.35, max_concurrent=6, max_drawdown_halt=20.0)
+  [OK  ] donchian-конфиг: частичный override сохраняет остальные дефолты   DonchianConfig(lookback=40, atr_period=14, trail_atr=2.0, max_bars=30, risk_percent=0.35, max_concurrent=6, max_drawdown_halt=20.0, er_filter=False, er_period=20, er_threshold_window=950)
+  [OK  ] donchian-конфиг: неизвестный ключ игнорируется, не роняет бота   DonchianConfig(lookback=40, atr_period=20, trail_atr=2.0, max_bars=30, risk_percent=0.35, max_concurrent=6, max_drawdown_halt=20.0, er_filter=False, er_period=20, er_threshold_window=950)
   [OK  ] donchian-конфиг: risk_percent=0 отклонён
   [OK  ] donchian-конфиг: risk_percent=99 отклонён
   [OK  ] live-конфиг: ровно 10 монет пула   10
@@ -115,7 +159,7 @@
   [OK  ] live-конфиг: commission_haircut=0 (паритет с H24)
   [OK  ] live-конфиг: невалидированные дневные лимиты отключены
   [OK  ] live-размер = H24 (equity*0.35%/2*ATR, без haircut)   size=145.46 risk%=0.3500
-  [OK  ] run_cycle: check_exits идёт ПЕРЕД обновлением трейлинга   check_exits@54296 < _donchian_trailing@54643
+  [OK  ] run_cycle: check_exits идёт ПЕРЕД обновлением трейлинга   check_exits@55806 < _donchian_trailing@56153
   [OK  ] run_cycle: трейлинг вызывается только если позиция не закрылась
 
 ============================================================================================

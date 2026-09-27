@@ -24,7 +24,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from core.donchian_breakout import (  # noqa: E402
     LONG, SHORT, DonchianConfig, DonchianExit, DonchianSignalGenerator,
-    DrawdownHalt, atr_series, position_size, signal_series,
+    DrawdownHalt, atr_series, efficiency_ratio, er_threshold_at,
+    position_size, signal_series,
 )
 import h24_unified_cost as H24  # noqa: E402
 
@@ -494,6 +495,43 @@ class StubBot:
     _donchian_config_for = None
 
 
+def test_syntax_gate():
+    """Жесткий гейт перед деплоем.
+
+    Синтаксическая ошибка в main.py уехала на VPS и уронила контейнер в
+    рестарт-цикл. Компиляция ВСЕХ боевых модулей проверяется здесь, чтобы
+    это ловилось локально, а не в проде.
+    """
+    import py_compile
+    P('=' * 92)
+    P('4. СИНТАКСИС-GATE (обязателен перед docker cp)')
+    P('=' * 92)
+    P('')
+    root = Path(__file__).parent
+    targets = ['main.py', 'core/donchian_breakout.py', 'core/bybit_client.py',
+               'core/order_executor.py', 'core/position_tracker.py',
+               'core/risk_manager.py', 'core/redis_store.py']
+    for t in targets:
+        f = root / t
+        try:
+            py_compile.compile(str(f), doraise=True, cfile=str(root / '_sync_tmp.pyc'))
+            check(f'компилируется: {t}', True, '')
+        except py_compile.PyCompileError as e:
+            check(f'компилируется: {t}', False, str(e).strip().splitlines()[-1])
+        except Exception as e:  # noqa: BLE001
+            check(f'компилируется: {t}', False, str(e))
+    (root / '_sync_tmp.pyc').unlink(missing_ok=True)
+    # import самого main.py — ловит ошибки уровня модуля (не только синтаксис)
+    try:
+        import importlib
+        importlib.import_module('main')
+        check('main.py импортируется (нет ошибок уровня модуля)', True, '')
+    except Exception as e:  # noqa: BLE001
+        check('main.py импортируется (нет ошибок уровня модуля)', False,
+              f'{type(e).__name__}: {e}')
+    P('')
+
+
 def test_wiring():
     import main
     import yaml
@@ -677,6 +715,160 @@ def test_wiring():
     P('')
 
 
+# ─── 7. ER-фильтр входа (H32/H33/H36) ─────────────────────────────
+
+def test_er_filter():
+    P('=' * 92)
+    P('7. ER-ФИЛЬТР ВХОДА (H32/H33/H36)')
+    P('=' * 92)
+    P('')
+
+    off = DonchianConfig()
+    check('ER-фильтр ВЫКЛЮЧЕН по умолчанию (стратегия не меняется молча)',
+          off.er_filter is False, f'er_filter={off.er_filter}')
+    check('выключенный фильтр не меняет прогрев',
+          off.warmup_bars == max(off.lookback, off.atr_period) + 1,
+          f'warmup={off.warmup_bars}')
+
+    cfg = DonchianConfig(er_filter=True, er_period=20, er_threshold_window=950)
+    gen = DonchianSignalGenerator('TESTUSDT', cfg)
+    n_need = cfg.er_period + cfg.er_threshold_window + 2
+    check('прогрев с фильтром = er_period + window + 2',
+          cfg.warmup_bars == n_need, f'{cfg.warmup_bars} vs {n_need}')
+
+    # --- формула ER совпадает с бэктестовой (h33/h36) ---
+    # Ряд длиной 1200, чтобы окно порога в 950 баров реально наполнялось.
+    rng = np.random.default_rng(7)
+    c = 100 * np.exp(np.cumsum(rng.normal(0, 0.01, 1200)))
+    er = efficiency_ratio(c, 20)
+    manual = []
+    for k in range(1200):
+        if k < 20:
+            manual.append(np.nan)
+            continue
+        # 20 шагов: путь c[k-20] -> c[k], как в pd.Series(diff).rolling(20)
+        net = abs(c[k] - c[k - 20])
+        path = np.abs(np.diff(c[k - 20:k + 1])).sum()
+        manual.append(net / path if path > 0 else np.nan)
+    manual = np.array(manual)
+    both = ~np.isnan(er) & ~np.isnan(manual)
+    check('ER совпадает с ручным расчётом Kaufman',
+          np.allclose(er[both], manual[both], rtol=0, atol=1e-12),
+          f'max|d|={np.abs(er[both]-manual[both]).max():.3e}')
+
+    # --- порог = медиана строго ДО сигнального бара ---
+    K = 1100
+    th = er_threshold_at(er, K, 950)
+    ref = np.nanmedian(er[K - 950:K])
+    check('порог определён при достаточной истории', th is not None, f'{th}')
+    check('порог = медиана ER[i-window:i], без бара i',
+          th is not None and abs(th - ref) < 1e-12, f'{th} vs {ref}')
+    # подмена текущего бара не должна двигать порог
+    er2 = er.copy()
+    er2[K] = 999.0
+    check('порог не зависит от значения ER на сигнальном баре',
+          abs(er_threshold_at(er2, K, 950) - th) < 1e-12, '')
+    check('порог None при нехватке истории',
+          er_threshold_at(er, 30, 950) is None, '')
+
+    # --- ER не заглядывает вперёд ---
+    cfut = c.copy()
+    cfut[K + 1:] *= 3.0
+    check('ER на баре i не зависит от будущих баров',
+          np.allclose(efficiency_ratio(cfut, 20)[K],
+                      efficiency_ratio(c, 20)[K], rtol=0, atol=1e-12), '')
+
+    # --- выключенный фильтр = полное поведение (H24-паритет) ---
+    # Donchian срабатывает редко, поэтому бары ищем сканом, а не по индексу.
+    gen_off = DonchianSignalGenerator('TESTUSDT', DonchianConfig())
+    df = synth(1200)
+
+    sig_bars = [k for k in range(DonchianConfig().warmup_bars, 1198)
+                if gen_off.evaluate(df, k) is not None]
+    check('синтетика даёт сигнальные бары для проверки', len(sig_bars) > 0,
+          f'{len(sig_bars)} баров')
+    if sig_bars:
+        k = sig_bars[0]
+        so, sn = gen_off.evaluate(df, k), gen.evaluate(df, k)
+        check('фильтр на сигнальном баре: либо тот же сигнал, либо отсев',
+              (sn is None) or (sn['direction'] == so['direction']
+                               and abs(sn['entry'] - so['entry']) < 1e-12
+                               and abs(sn['stop'] - so['stop']) < 1e-12), '')
+        if sn is not None:
+            check('в extras видны ER и порог',
+                  sn['extras']['er'] is not None
+                  and sn['extras']['er_threshold'] is not None, '')
+            check('прошедший сигнал имеет ER >= порога',
+                  sn['extras']['er'] >= sn['extras']['er_threshold'],
+                  f'er={sn["extras"]["er"]:.3f} th={sn["extras"]["er_threshold"]:.3f}')
+
+    # прогрев: бар НИЖЕ warmup с фильтром отсекается всегда (fail-closed)
+    early = [k for k in range(DonchianConfig().warmup_bars, cfg.warmup_bars)
+             if gen_off.evaluate(df, k) is not None]
+    check('есть сигналы ниже прогрева фильтра (проверка fail-closed)',
+          len(early) > 0, f'{len(early)} баров')
+    if early:
+        check('прогрев с фильтром отсекает ранние сигналы (fail-closed)',
+              gen.evaluate(df, early[0]) is None
+              and gen_off.evaluate(df, early[0]) is not None, '')
+    check('выходы фильтра не трогает (стоп = 2*ATR как в H24)',
+          DonchianConfig().trail_atr == cfg.trail_atr == 2.0, '')
+    check('фильтр не меняет risk_percent/max_bars',
+          off.risk_percent == cfg.risk_percent == 0.35
+          and off.max_bars == cfg.max_bars == 30, '')
+
+    # --- фильтр активен, но не смертелен: режет часть, не всё ---
+    df2 = synth(1400, seed=21)
+    n_base = n_filt = 0
+    for k in range(cfg.warmup_bars, 1398):
+        if gen_off.evaluate(df2, k) is not None:
+            n_base += 1
+        if gen.evaluate(df2, k) is not None:
+            n_filt += 1
+    check('фильтр пропускает сигналы (не fail-closed по всем)',
+          n_filt > 0, f'baseline {n_base}, с фильтром {n_filt}')
+    check('фильтр режет часть сигналов, но не все',
+          0 < n_filt < n_base, f'baseline {n_base}, с фильтром {n_filt}')
+    # доля отсева должна быть в разумных пределах (H33: ~20% сделок)
+    keep = n_filt / n_base if n_base else 0
+    check('доля прошедших сигналов 50-100% (как в H33)',
+          0.5 <= keep <= 1.0, f'осталось {keep*100:.0f}%')
+
+    # --- live-конфиг реально включает фильтр на весь пул ---
+    try:
+        import yaml
+        sp = Path(__file__).parent.joinpath('config', 'settings.yaml')
+        y = yaml.safe_load(sp.read_text(encoding='utf-8'))
+        g = (y.get('donchian') or {})
+        check('settings.yaml: donchian.er_filter = true', g.get('er_filter') is True,
+              f'{g}')
+        check('settings.yaml: er_threshold_window = 950',
+              g.get('er_threshold_window') == 950, f'{g.get("er_threshold_window")}')
+        check('settings.yaml: er_period = 20', g.get('er_period') == 20, '')
+        need = int(g.get('er_threshold_window', 0)) + int(g.get('er_period', 0)) + 4
+        check('порог влезает в лимит Bybit (1000 баров на запрос)', need <= 1000,
+              f'нужно {need}')
+        # Блок donchian не должен «съедать» ключи risk (баг с отступом):
+        check('settings.yaml: в donchian только ER-ключи',
+              set(g) == {'er_filter', 'er_period', 'er_threshold_window'},
+              f'лишние: {set(g) - {"er_filter", "er_period", "er_threshold_window"}}')
+        rk = y.get('risk') or {}
+        check('settings.yaml: risk.commission_haircut присутствует и = 0',
+              'commission_haircut' in rk and rk['commission_haircut'] == 0.0,
+              f'risk keys={sorted(rk)}')
+        check('settings.yaml: risk-блок не потерял ключи H24',
+              all(k in rk for k in ('risk_percent', 'commission', 'slippage',
+                                    'max_drawdown', 'max_concurrent_positions',
+                                    'max_leverage', 'commission_haircut')),
+              f'risk keys={sorted(rk)}')
+        check('settings.yaml: risk_percent = 0.35 (H24-паритет)',
+              rk.get('risk_percent') == 0.35, f'{rk.get("risk_percent")}')
+    except Exception as e:  # noqa: BLE001
+        check('settings.yaml читается и включает ER-фильтр', False, str(e))
+
+    P('')
+
+
 def main():
     P('=' * 92)
     P('ТЕСТ ПАРИТЕТА: core/donchian_breakout.py против H24')
@@ -690,6 +882,8 @@ def main():
     test_indicators(data, idx)
     test_portfolio(data, idx)
     test_invariants()
+    test_syntax_gate()
+    test_er_filter()
     test_tracker_regression()
     test_wiring()
 

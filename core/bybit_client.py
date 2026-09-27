@@ -14,6 +14,25 @@ from urllib.parse import urlencode
 
 logger = logging.getLogger(__name__)
 
+# Транзиентные сетевые сбои. На VPS к api-demo.bybit.com изредка (4-8 раз в
+# сутки на 10 монет) встаёт чтение тела ответа: соединение установлено, запрос
+# отправлен, а chunked-body не приходит — urllib3 роняет это как ReadTimeout.
+# Раньше цикл retry в _request ловил только HTTP 429, поэтому любое такое
+# исключение вылетало наружу и убивало цикл символа целиком (не проверялись
+# выходы, не обновлялся трейлинг). Замер в контейнере: 10 символов x 1000
+# баров проходят за 3.6s, максимум 0.56s — то есть API не медленный, это
+# именно редкие заминки, и повтор через 1-2s их закрывает.
+TRANSIENT_NET = (
+    requests.exceptions.ReadTimeout,
+    requests.exceptions.ConnectTimeout,
+    requests.exceptions.ConnectionError,
+    requests.exceptions.ChunkedEncodingError,
+)
+
+# Паузы между попытками, в секундах. Суммарно worst case +3s при трёх
+# попытках, цикл бота ходит раз в 5 минут — укладывается с запасом.
+RETRY_BACKOFF = (1.0, 2.0)
+
 
 class BybitClient:
     """Bybit V5 API Client (Linear Perpetual)"""
@@ -67,7 +86,15 @@ class BybitClient:
 
     def _request(self, method: str, endpoint: str, params: Optional[Dict] = None,
                  signed: bool = False) -> Dict:
-        """Make API request (thread-safe with 429 retry)."""
+        """Make API request (thread-safe; retries 429 and transient network
+        errors on GET).
+
+        POST намеренно НЕ перезапрашивается при сетевой ошибке: по таймауту
+        чтения нельзя отличить «заявка не дошла» от «заявка прошла, ответ
+        потерялся». Повтор маркет-ордера в этом случае открыл бы вторую
+        позицию. Вместо этого состояние сверяется с биржей на следующем
+        цикле (поз. трекинг + restore), поэтому потерянный ответ безопасен.
+        """
         with self._lock:
             for attempt in range(3):
                 url = f"{self.BASE_URL}{endpoint}"
@@ -86,10 +113,20 @@ class BybitClient:
                         "X-BAPI-RECV-WINDOW": "50000",
                     })
                 
-                if method == "GET":
-                    resp = self.session.get(url, params=params, timeout=30)
-                else:
-                    resp = self.session.post(url, json=params, timeout=30)
+                try:
+                    if method == "GET":
+                        resp = self.session.get(url, params=params, timeout=30)
+                    else:
+                        resp = self.session.post(url, json=params, timeout=30)
+                except TRANSIENT_NET as e:
+                    if method != "GET" or attempt == len(RETRY_BACKOFF):
+                        raise
+                    delay = RETRY_BACKOFF[attempt]
+                    logger.warning(
+                        f"{method} {endpoint}: {type(e).__name__}, "
+                        f"повтор через {delay}s (попытка {attempt+1}/3)")
+                    time.sleep(delay)
+                    continue
                 
                 if resp.status_code == 429:
                     retry_after = int(resp.headers.get('Retry-After', 5))

@@ -260,6 +260,114 @@ for i in range(5):
 chk('счётчик баров растёт (1 → 6)', b['bars_evaluated'] == 6, b['bars_evaluated'])
 
 print()
+print('=== регрессия: транзиентные сетевые ошибки Bybit ===')
+# Прод-баг 2026-09-27: _request перезапрашивал только HTTP 429. ReadTimeout
+# при чтении тела ответа вылетал наружу и убивал цикл символа целиком —
+# не проверялись выходы, не обновлялся трейлинг. Замер в контейнере показал,
+# что API быстрый (10 символов x 1000 баров = 3.6s), значит это заминки сети,
+# и повтор их закрывает.
+import time  # noqa: E402
+import requests  # noqa: E402
+from core.bybit_client import (  # noqa: E402
+    BybitClient, RETRY_BACKOFF, TRANSIENT_NET)
+
+
+class _Resp:
+    status_code = 200
+    headers = {}
+    content = b'{}'
+
+    def json(self):
+        return {'retCode': 0, 'result': {'list': [{'ok': 1}]}}
+
+
+class _Boom:
+    """Session-заглушка: первые n попыток падают, дальше отвечает."""
+
+    def __init__(self, fail_first, exc=None):
+        self.fail_first = fail_first
+        self.exc = exc or requests.exceptions.ReadTimeout('Read timed out.')
+        self.gets = 0
+        self.posts = 0
+
+    def get(self, url, params=None, timeout=None):
+        self.gets += 1
+        if self.gets <= self.fail_first:
+            raise self.exc
+        return _Resp()
+
+    def post(self, url, json=None, timeout=None):
+        self.posts += 1
+        raise self.exc
+
+    def headers_update(self, d):
+        pass
+
+
+def _client(session):
+    c = BybitClient.__new__(BybitClient)
+    c.api_key = c.api_secret = ''
+    c._lock = __import__('threading').Lock()
+    c._time_offset = 0
+    c.session = session
+    session.headers = {}
+    return c
+
+
+# GET: две сетевые заминки подряд — третья попытка обязана succeed
+s1 = _Boom(fail_first=2)
+c1 = _client(s1)
+orig_sleep = time.sleep
+time.sleep = lambda *_a, **_k: None
+try:
+    r1 = c1._request('GET', '/v5/market/kline', {'symbol': 'ADAUSDT'})
+    ok_get = s1.gets == 3 and r1 == {'list': [{'ok': 1}]}
+except Exception as e:
+    ok_get = False
+    r1 = e
+finally:
+    time.sleep = orig_sleep
+chk('GET перезапрашивается при ReadTimeout и доходит на 3-й попытке',
+    ok_get, f'gets={s1.gets} ret={r1!r}')
+
+# GET: заминки на всех попытках — исключение пробрасывается, не глотается
+s2 = _Boom(fail_first=99)
+c2 = _client(s2)
+time.sleep = lambda *_a, **_k: None
+try:
+    c2._request('GET', '/v5/market/kline', {})
+    raised = None
+except Exception as e:
+    raised = e
+finally:
+    time.sleep = orig_sleep
+chk('GET не маскирует сетевую ошибку после 3 попыток',
+    isinstance(raised, requests.exceptions.ReadTimeout) and s2.gets == 3,
+    f'gets={s2.gets} raised={type(raised).__name__}')
+
+# POST: НЕ перезапрашивается — иначе повтор маркет-ордера откроет вторую позицию
+s3 = _Boom(fail_first=99)
+c3 = _client(s3)
+time.sleep = lambda *_a, **_k: None
+try:
+    c3._request('POST', '/v5/order/create', {})
+    raised3 = None
+except Exception as e:
+    raised3 = e
+finally:
+    time.sleep = orig_sleep
+chk('POST при сетевой ошибке НЕ перезапрашивается (1 попытка)',
+    isinstance(raised3, requests.exceptions.ReadTimeout) and s3.posts == 1,
+    f'posts={s3.posts} raised={type(raised3).__name__}')
+
+# покрыты все четыре класса транзиентных ошибок
+chk('TRANSIENT_NET покрывает Read/Connect Timeout, ConnectionError, ChunkedEncoding',
+    all(issubclass(e, requests.exceptions.RequestException) for e in TRANSIENT_NET)
+    and len(TRANSIENT_NET) == 4, f'{[e.__name__ for e in TRANSIENT_NET]}')
+chk('паузы между попытками не превышают 2s (цикл бота 5 мин)',
+    RETRY_BACKOFF == (1.0, 2.0) and sum(RETRY_BACKOFF) < 5, RETRY_BACKOFF)
+
+print()
 print('=' * 62)
 print(f'{OK} passed, {FAILED} failed')
 sys.exit(1 if FAILED else 0)

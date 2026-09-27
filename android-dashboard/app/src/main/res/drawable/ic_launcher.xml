@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Векторная иконка вместо PNG: мотив — три растущих бара и линия пробоя
+  (стратегия Дончиана). Вектор не тянет бинарных файлов в репозиторий,
+  поэтому сборка в CI не зависит от наличия картинок.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+
+    <path
+        android:fillColor="#0E1626"
+        android:pathData="M2,2 h20 a2,2 0 0 1 2,2 v16 a2,2 0 0 1 -2,2 h-20 a2,2 0 0 1 -2,-2 v-16 a2,2 0 0 1 2,-2 Z" />
+
+    <path
+        android:fillColor="#334155"
+        android:pathData="M4,13 h3.5 v7 h-3.5 Z" />
+
+    <path
+        android:fillColor="#475569"
+        android:pathData="M10.25,9.5 h3.5 v10.5 h-3.5 Z" />
+
+    <path
+        android:fillColor="#22C55E"
+        android:pathData="M16.5,5 h3.5 v15 h-3.5 Z" />
+
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M4,10 L10.25,7 L16.5,3"
+        android:strokeColor="#4ADE80"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="1.4" />
+</vector>

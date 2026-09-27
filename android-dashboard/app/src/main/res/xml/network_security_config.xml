@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Дашборд живёт на голом IP по HTTP, без TLS. Android 9+ (API 28) по умолчанию
+  режет открытый HTTP, и WebView показывает белый экран без внятной причины.
+  Поэтому cleartext разрешён явно.
+
+  Трактовка: приложение внутреннее, ставится вручную и ходит на один
+  известный адрес. Если появится HTTPS (например, Cloudflare tunnel перед
+  VPS) — этот файл и android:usesCleartextTraffic можно убрать.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

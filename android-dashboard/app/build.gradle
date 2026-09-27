@@ -1,0 +1,37 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.smc.dashboard'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.smc.dashboard"
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            // Подписан debug-ключом: APK ставится на телефон без создания
+            // keystore. Для внутреннего приложения этого достаточно, в Play
+            // Store так публиковать нельзя.
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    // Единственная зависимость: pull-to-refresh. Без неё дашборд пришлось бы
+    // обновлять только кнопкой в меню.
+    implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
+}
